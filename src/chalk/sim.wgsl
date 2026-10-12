@@ -1,0 +1,259 @@
+// Chalk dust simulation. One invocation per particle, updated in place.
+// World space: y in [-1, 1] (up), x in [-aspect, aspect].
+
+struct Particle {
+  pos: vec2f,
+  vel: vec2f,
+  life: f32,     // age in seconds
+  maxLife: f32,  // dead when life >= maxLife
+  size: f32,     // base size in px
+  kind: f32,     // 0 = grain, 1 = cloud
+  depth: f32,    // 0 near .. 1 far
+  seed: f32,
+  burst: u32,    // last burst id this particle has seen
+  bright: f32,
+}
+
+struct Sim {
+  time: f32,
+  dt: f32,
+  aspect: f32,
+  count: u32,
+  frame: u32,
+
+  gravity: f32,
+  grainDrag: f32,
+  cloudDrag: f32,
+  cloudLift: f32,
+  turbulence: f32,   // eddies stirred up by a burst; they decay, the room air itself is still
+  eddyDecay: f32,
+  stillAir: f32,
+  diffusion: f32,
+  noiseScale: f32,
+  noiseSpeed: f32,
+  heavySize: f32,
+
+  cloudRatio: f32,
+  lifeMin: f32,
+  lifeMax: f32,
+  grainSizeMin: f32,
+  grainSizeMax: f32,
+  cloudSizeMin: f32,
+  cloudSizeMax: f32,
+  chunkChance: f32,
+  chunkSizeMin: f32,
+  chunkSizeMax: f32,
+
+  emitRate: f32,
+  emitSpeed: f32,
+  emitter: vec2f,
+  emitterSize: vec2f,
+
+  mouse: vec2f,
+  mouseVel: vec2f,
+  mouseRadius: f32,
+  mouseStrength: f32,
+  mouseSwirl: f32,
+
+  burstPos: vec2f,
+  burstId: u32,
+  burstFraction: f32,
+  burstSpeed: f32,
+  burstRadius: f32,
+  clapAngle: f32,
+  jetSpread: f32,
+  clapPuff: f32,
+  burstLift: f32,
+
+  glintChance: f32,
+  glintBoost: f32,
+
+  floorY: f32,
+  floorDepth: f32,
+  floorFriction: f32,
+  landingDamping: f32,
+  liftThreshold: f32,
+  settledAging: f32,
+}
+
+@group(0) @binding(0) var<storage, read_write> particles: array<Particle>;
+@group(0) @binding(1) var<uniform> sim: Sim;
+
+fn pcg(v: u32) -> u32 {
+  let s = v * 747796405u + 2891336453u;
+  let w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u;
+  return (w >> 22u) ^ w;
+}
+
+fn rnd(state: ptr<function, u32>) -> f32 {
+  *state = pcg(*state);
+  return f32(*state) * (1.0 / 4294967296.0);
+}
+
+fn hash31(p: vec3f) -> f32 {
+  var q = fract(p * 0.1031);
+  q += dot(q, q.zyx + 31.32);
+  return fract((q.x + q.y) * q.z);
+}
+
+fn vnoise(p: vec3f) -> f32 {
+  let i = floor(p);
+  let f = fract(p);
+  let u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+  let a = mix(hash31(i), hash31(i + vec3f(1, 0, 0)), u.x);
+  let b = mix(hash31(i + vec3f(0, 1, 0)), hash31(i + vec3f(1, 1, 0)), u.x);
+  let c = mix(hash31(i + vec3f(0, 0, 1)), hash31(i + vec3f(1, 0, 1)), u.x);
+  let d = mix(hash31(i + vec3f(0, 1, 1)), hash31(i + vec3f(1, 1, 1)), u.x);
+  return mix(mix(a, b, u.y), mix(c, d, u.y), u.z);
+}
+
+fn potential(p: vec2f, t: f32) -> f32 {
+  let q = vec3f(p, t);
+  return vnoise(q) + 0.5 * vnoise(q * 2.03 + 17.1);
+}
+
+// Divergence-free flow: rotated gradient of a scalar noise field. Swirls without sinks or sources.
+fn curl(p: vec2f, t: f32) -> vec2f {
+  let e = 0.05;
+  let dx = potential(p + vec2f(e, 0), t) - potential(p - vec2f(e, 0), t);
+  let dy = potential(p + vec2f(0, e), t) - potential(p - vec2f(0, e), t);
+  return vec2f(dy, -dx) / (2.0 * e);
+}
+
+// Roughly normal with unit variance; cheap enough for spawn-time use.
+fn gauss(st: ptr<function, u32>) -> f32 {
+  return (rnd(st) + rnd(st) + rnd(st) + rnd(st) - 2.0) * 1.732;
+}
+
+fn spawn(p: ptr<function, Particle>, st: ptr<function, u32>, isBurst: bool) {
+  let isCloud = rnd(st) < sim.cloudRatio;
+  (*p).kind = select(0.0, 1.0, isCloud);
+  (*p).depth = rnd(st);
+  (*p).seed = rnd(st);
+  (*p).bright = 0.55 + 0.45 * rnd(st);
+  if (!isCloud && rnd(st) < sim.glintChance) {
+    (*p).bright *= sim.glintBoost; // a few chalk crystals catch the light
+  }
+  (*p).life = 0.0;
+  (*p).maxLife = mix(sim.lifeMin, sim.lifeMax, rnd(st)) * select(1.0, 1.4, isCloud);
+
+  let s = rnd(st);
+  if (isCloud) {
+    (*p).size = mix(sim.cloudSizeMin, sim.cloudSizeMax, s);
+  } else {
+    // Mostly fine powder, plus the occasional crumb of block chalk.
+    (*p).size = mix(sim.grainSizeMin, sim.grainSizeMax, s * s);
+    if (rnd(st) < sim.chunkChance) {
+      (*p).size = mix(sim.chunkSizeMin, sim.chunkSizeMax, rnd(st));
+    }
+  }
+
+  if (isBurst) {
+    // A clap squeezes chalk out of the gap between the palms: two opposite jets along the clap axis,
+    // plus a puff that spills out in every direction. Smoke is split between the two.
+    var a: f32;
+    if (rnd(st) < select(sim.clapPuff, 0.35, isCloud)) {
+      a = rnd(st) * 6.2831853;
+    } else {
+      let side = select(0.0, 3.1415927, rnd(st) < 0.5);
+      a = sim.clapAngle + side + gauss(st) * sim.jetSpread;
+    }
+    let dir = vec2f(cos(a), sin(a));
+    let r = sqrt(rnd(st)) * sim.burstRadius;
+    let ra = rnd(st) * 6.2831853;
+    (*p).pos = sim.burstPos + vec2f(cos(ra), sin(ra)) * r;
+    // Exponential speed distribution: most dust puffs gently, a few grains shoot far.
+    let speed = sim.burstSpeed * -log(max(rnd(st), 1e-4)) * select(1.0, 0.6, isCloud);
+    (*p).vel = dir * speed + vec2f(0.0, sim.burstSpeed * sim.burstLift);
+  } else {
+    let o = vec2f(rnd(st), rnd(st)) * 2.0 - 1.0;
+    (*p).pos = sim.emitter + o * sim.emitterSize;
+    let up = sim.emitSpeed * (0.3 + rnd(st));
+    (*p).vel = vec2f((rnd(st) - 0.5) * sim.emitSpeed, up) * select(1.0, 0.6, isCloud);
+  }
+}
+
+@compute @workgroup_size(64)
+fn cs_main(@builtin(global_invocation_id) id: vec3u) {
+  let i = id.x;
+  if (i >= sim.count) { return; }
+
+  var p = particles[i];
+  var st = pcg(i ^ pcg(sim.frame * 9781u + 1u));
+  let dt = sim.dt;
+
+  if (p.burst != sim.burstId) {
+    p.burst = sim.burstId;
+    if (rnd(&st) < sim.burstFraction) {
+      spawn(&p, &st, true);
+    }
+  }
+
+  if (p.life >= p.maxLife) {
+    if (rnd(&st) < 1.0 - exp(-sim.emitRate * dt)) {
+      spawn(&p, &st, false);
+    } else {
+      particles[i] = p;
+      return;
+    }
+  }
+
+  let isCloud = p.kind > 0.5;
+
+  let d = p.pos - sim.mouse;
+  let r2 = dot(d, d);
+  let falloff = exp(-r2 / (sim.mouseRadius * sim.mouseRadius));
+  let mouseSpeed = length(sim.mouseVel);
+  let tangent = vec2f(-d.y, d.x) / max(sqrt(r2), 1e-3);
+  let wake = (sim.mouseVel * sim.mouseStrength + tangent * mouseSpeed * sim.mouseSwirl) * falloff;
+
+  // Far particles rest higher, so settled dust forms a receding ground plane instead of a line.
+  let floorY = sim.floorY + p.depth * sim.floorDepth;
+  let onFloor = p.pos.y <= floorY + 1e-5;
+
+  if (onFloor) {
+    // Resting dust ignores the gentle room air and gravity; only a fast cursor sweep lifts it again.
+    let wakeSpeed = length(wake);
+    if (wakeSpeed > sim.liftThreshold) {
+      let kick = wake * (1.0 - sim.liftThreshold / wakeSpeed);
+      p.vel = vec2f(kick.x, abs(kick.y) + length(kick) * 0.5);
+    } else {
+      p.vel.x *= exp(-sim.floorFriction * dt);
+      p.vel.y = 0.0;
+    }
+    p.pos += p.vel * dt;
+    p.pos.y = max(p.pos.y, floorY);
+    p.life += dt * sim.settledAging; // settled chalk lingers before it fades
+  } else {
+    // No wind: the only air motion is the eddying a burst kicks up, which dies out with the
+    // particle's age, plus whatever the cursor stirs.
+    let eddy = sim.turbulence * exp(-p.life / sim.eddyDecay) + sim.stillAir;
+    let air = curl(p.pos * sim.noiseScale + p.depth * 3.0, sim.time * sim.noiseSpeed) * eddy + wake;
+
+    // Stokes-like settling: bigger pieces fall faster and shrug off the air; smoke barely sinks.
+    let heavy = clamp(p.size / sim.heavySize, 0.0, 1.0);
+    let g = select(sim.gravity * mix(0.35, 2.5, heavy), sim.gravity * (1.0 - sim.cloudLift), isCloud);
+    let coupling = select(sim.grainDrag * mix(1.6, 0.2, heavy), sim.cloudDrag, isCloud);
+    p.vel.y -= g * dt;
+    if (isCloud) {
+      // Slow Brownian spreading so lingering smoke diffuses in place instead of drifting.
+      p.vel += vec2f(gauss(&st), gauss(&st)) * sim.diffusion * sqrt(dt);
+    }
+    p.vel = air + (p.vel - air) * exp(-coupling * dt);
+    p.pos += p.vel * dt;
+
+    // Landing: the impact kills vertical motion and most of the horizontal, so dust stays where it falls.
+    if (p.pos.y < floorY) {
+      p.pos.y = floorY;
+      p.vel = vec2f(p.vel.x * sim.landingDamping, 0.0);
+    }
+    p.life += dt;
+  }
+
+  let margin = 0.4;
+  if (abs(p.pos.x) > sim.aspect + margin || p.pos.y > 1.0 + margin || p.pos.y < -1.0 - margin) {
+    p.life = p.maxLife;
+  }
+
+  particles[i] = p;
+}

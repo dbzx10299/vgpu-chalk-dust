@@ -1,0 +1,20 @@
+:root {
+  --bg: #000;
+  --text: #f4f1ea;
+  --muted: rgba(244, 241, 234, 0.6);
+  --sans: 'Inter', system-ui, 'Segoe UI', Roboto, sans-serif;
+
+  font: 16px/1.5 var(--sans);
+  color: var(--text);
+  background: var(--bg);
+  color-scheme: dark;
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}

@@ -1,0 +1,103 @@
+.chalk-canvas {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  z-index: 0;
+  pointer-events: none;
+}
+
+.site-header,
+main {
+  position: relative;
+  z-index: 1;
+}
+
+.site-header {
+  position: fixed;
+  inset: 0 0 auto;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 28px 48px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+}
+
+.logo {
+  font-size: 1.6rem;
+}
+
+.cart {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.hero {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  align-items: flex-start;
+  padding: 0 48px 22vh;
+}
+
+.hero h1 {
+  margin: 0 0 40px;
+  font-size: clamp(2.6rem, 8vw, 6rem);
+  font-weight: 800;
+  letter-spacing: -0.04em;
+  line-height: 1;
+}
+
+.cta {
+  padding: 18px 32px;
+  border: 3px solid rgba(244, 241, 234, 0.75);
+  border-radius: 999px;
+  background: rgba(40, 40, 40, 0.6);
+  color: var(--text);
+  font-weight: 700;
+  font-size: 1.1rem;
+  text-transform: uppercase;
+  text-decoration: none;
+  backdrop-filter: blur(6px);
+}
+
+.gpu-error {
+  margin-top: 24px;
+  color: #ff8a8a;
+}
+
+.product {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 48px;
+}
+
+.product-card {
+  max-width: 520px;
+  text-align: center;
+}
+
+.product-card h2 {
+  margin: 8px 0 12px;
+  font-size: clamp(2rem, 5vw, 3.4rem);
+  letter-spacing: -0.03em;
+  line-height: 1.05;
+}
+
+.product-card p {
+  color: var(--muted);
+}
+
+.eyebrow {
+  text-transform: uppercase;
+  letter-spacing: 0.2em;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.spacer {
+  height: 60vh;
+}
