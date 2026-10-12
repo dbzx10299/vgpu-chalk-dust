@@ -66,6 +66,7 @@ export function createChalkGui(dust: ChalkDust, onBurst: () => void): GUI {
   clumps.add(p, 'clumpGravity', 0, 6, 0.01).name('clump weight')
   clumps.add(p, 'clumpDrag', 0, 3, 0.01).name('clump drag')
   clumps.add(p, 'shatterSpeed', 0, 1, 0.01).name('shatter speed')
+  clumps.add(p, 'liftThreshold', 0, 5, 0.01).name('cursor break threshold')
 
   const light = gui.addFolder('Lighting')
   light.add(p, 'lightX', -1.2, 1.2, 0.01).name('light x')
@@ -86,7 +87,8 @@ export function createChalkGui(dust: ChalkDust, onBurst: () => void): GUI {
   floor.add(p, 'floorDepth', 0, 1, 0.01).name('depth')
   floor.add(p, 'floorFriction', 0, 40, 0.1).name('friction')
   floor.add(p, 'landingDamping', 0, 1, 0.01).name('landing slide')
-  floor.add(p, 'liftThreshold', 0, 5, 0.01).name('cursor lift threshold')
+  floor.add(p, 'floorFlatten', 0.1, 1, 0.01).name('flatten')
+  floor.add(p, 'floorShade', 0, 1.5, 0.01).name('shade')
   floor.add(p, 'settledAging', 0, 1, 0.01).name('settled aging')
 
   const look = gui.addFolder('Look')
@@ -102,6 +104,7 @@ export function createChalkGui(dust: ChalkDust, onBurst: () => void): GUI {
   look.add(p, 'depthFade', 0, 1, 0.01).name('depth fade')
   look.add(p, 'depthShrink', 0, 0.95, 0.01).name('depth shrink')
   look.add(p, 'shutter', 0, 0.1, 0.001).name('motion blur (s)')
+  look.add(p, 'maxStreak', 0, 60, 0.5).name('max streak px')
   look.add(p, 'focusDepth', 0, 1, 0.01).name('focus depth')
   look.add(p, 'dofAmount', 0, 40, 0.1).name('depth of field px')
 

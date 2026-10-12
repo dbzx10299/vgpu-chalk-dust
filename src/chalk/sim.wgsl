@@ -13,7 +13,7 @@ struct Particle {
   burst: u32,    // last burst id this particle has seen
   bright: f32,
   breakAt: f32,  // > 0 while bonded into a falling clump; the clump shatters at this age
-  _pad: f32,
+  grounded: f32, // 1 while resting on the floor
 }
 
 struct Sim {
@@ -150,6 +150,7 @@ fn spawn(p: ptr<function, Particle>, st: ptr<function, u32>, isBurst: bool) {
   }
   (*p).life = 0.0;
   (*p).breakAt = 0.0;
+  (*p).grounded = 0.0;
   (*p).maxLife = mix(sim.lifeMin, sim.lifeMax, rnd(st)) * select(1.0, 1.4, isCloud);
 
   let s = rnd(st);
@@ -221,6 +222,7 @@ fn spawnClump(p: ptr<function, Particle>, gst: ptr<function, u32>, st: ptr<funct
   let o = vec2f(cos(rot) * local.x - sin(rot) * local.y, sin(rot) * local.x + cos(rot) * local.y);
 
   (*p).kind = 0.0;
+  (*p).grounded = 0.0;
   (*p).depth = depth;
   (*p).vel = dir * speed + vec2f(0.0, sim.burstSpeed * sim.burstLift);
   (*p).pos = center + o;
@@ -311,17 +313,11 @@ fn cs_main(@builtin(global_invocation_id) id: vec3u) {
   let onFloor = p.pos.y <= floorY + 1e-5;
 
   if (onFloor) {
-    // Resting dust ignores the gentle room air and gravity; only a fast cursor sweep lifts it again.
-    let wakeSpeed = length(wake);
-    if (wakeSpeed > sim.liftThreshold) {
-      let kick = wake * (1.0 - sim.liftThreshold / wakeSpeed);
-      p.vel = vec2f(kick.x, abs(kick.y) + length(kick) * 0.5);
-    } else {
-      p.vel.x *= exp(-sim.floorFriction * dt);
-      p.vel.y = 0.0;
-    }
+    // Resting dust stays put: no air, no gravity, and the cursor doesn't disturb it.
+    p.vel = vec2f(p.vel.x * exp(-sim.floorFriction * dt), 0.0);
     p.pos += p.vel * dt;
-    p.pos.y = max(p.pos.y, floorY);
+    p.pos.y = floorY;
+    p.grounded = 1.0;
     p.life += dt * sim.settledAging; // settled chalk lingers before it fades
   } else {
     // No wind: the only air motion is the eddying a burst kicks up, which dies out with the
@@ -342,9 +338,11 @@ fn cs_main(@builtin(global_invocation_id) id: vec3u) {
     p.pos += p.vel * dt;
 
     // Landing: the impact kills vertical motion and most of the horizontal, so dust stays where it falls.
+    p.grounded = 0.0;
     if (p.pos.y < floorY) {
       p.pos.y = floorY;
       p.vel = vec2f(p.vel.x * sim.landingDamping, 0.0);
+      p.grounded = 1.0;
     }
     p.life += dt;
   }

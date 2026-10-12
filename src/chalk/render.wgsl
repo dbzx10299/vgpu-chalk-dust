@@ -14,7 +14,7 @@ struct Particle {
   burst: u32,
   bright: f32,
   breakAt: f32,
-  _pad: f32,
+  grounded: f32,
 }
 
 struct View {
@@ -41,6 +41,9 @@ struct View {
   focusDepth: f32,
   dofAmount: f32,
   layer: f32, // 0 = grains, 1 = smoke
+  maxStreak: f32,
+  floorFlatten: f32,
+  floorShade: f32,
 }
 
 @group(0) @binding(0) var<storage, read> particles: array<Particle>;
@@ -123,9 +126,16 @@ fn vs_main(@builtin(vertex_index) v: u32, @builtin(instance_index) i: u32) -> Vs
     let velPx = p.vel * view.resolution.y * 0.5;
     let speed = length(velPx);
     let dir = select(vec2f(1.0, 0.0), velPx / max(speed, 1e-4), speed > 1e-3);
-    let streak = speed * view.shutter;
+    // Capped so a fast cursor flick can't draw long lines; resting dust never streaks.
+    let grounded = p.grounded > 0.5;
+    let streak = select(min(speed * view.shutter, view.maxStreak * view.sizeScale), 0.0, grounded);
     alpha *= sizePx / (sizePx + streak);
     offset = dir * c.x * (sizePx + streak) + vec2f(-dir.y, dir.x) * c.y * sizePx;
+    if (grounded) {
+      // Seen at a grazing angle, dust lying on the floor is foreshortened and out of the backlight.
+      offset.y *= view.floorFlatten;
+      light *= view.floorShade;
+    }
   }
 
   let center = vec2f(p.pos.x / view.aspect, p.pos.y);

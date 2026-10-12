@@ -103,6 +103,8 @@ export const defaultParams = {
   landingDamping: 0.2,
   liftThreshold: 0.6,
   settledAging: 0.35,
+  floorFlatten: 0.45,
+  floorShade: 0.6,
 
   // Rendering
   renderScale: 0.75,
@@ -117,6 +119,7 @@ export const defaultParams = {
   speckle: 0.6,
   speckleScale: 9,
   shutter: 0.04,
+  maxStreak: 10,
   focusDepth: 0.5,
   dofAmount: 4,
 
@@ -320,6 +323,9 @@ export class ChalkDust {
         shutter: p.shutter * p.timeScale, // streak length follows on-screen speed
         focusDepth: p.focusDepth,
         dofAmount: p.dofAmount,
+        maxStreak: p.maxStreak,
+        floorFlatten: p.floorFlatten,
+        floorShade: p.floorShade,
       }
       this.grains.set({
         view: { ...view, layer: 0, resolution: this.accum.size, sizeScale: p.sizeScale * dpr * p.renderScale },
