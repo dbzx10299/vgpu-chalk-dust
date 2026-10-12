@@ -57,6 +57,16 @@ export function createChalkGui(dust: ChalkDust, onBurst: () => void): GUI {
   burst.add(p, 'clapPuff', 0, 1, 0.01).name('omni puff share')
   burst.add(p, 'burstLift', -0.5, 1, 0.01).name('upward lift')
 
+  const clumps = gui.addFolder('Clumps')
+  clumps.add(p, 'clumpChance', 0, 1, 0.01).name('clump share')
+  clumps.add(p, 'clumpRadius', 0.002, 0.1, 0.001).name('clump radius')
+  clumps.add(p, 'clumpTilt', -60, 30, 1).name('launch tilt °')
+  clumps.add(p, 'clumpBreakMin', 0, 3, 0.01).name('core holds min (s)')
+  clumps.add(p, 'clumpBreakMax', 0, 5, 0.01).name('core holds max (s)')
+  clumps.add(p, 'clumpGravity', 0, 6, 0.01).name('clump weight')
+  clumps.add(p, 'clumpDrag', 0, 3, 0.01).name('clump drag')
+  clumps.add(p, 'shatterSpeed', 0, 1, 0.01).name('shatter speed')
+
   const light = gui.addFolder('Lighting')
   light.add(p, 'lightX', -1.2, 1.2, 0.01).name('light x')
   light.add(p, 'lightY', -1.2, 1.2, 0.01).name('light y')
@@ -101,7 +111,7 @@ export function createChalkGui(dust: ChalkDust, onBurst: () => void): GUI {
   tone.add(p, 'contrast', 0.3, 3, 0.01)
   tone.add(p, 'grain', 0, 1, 0.01).name('film grain')
 
-  for (const folder of [physics, population, emitter, interaction, burst, light, floor, look, tone]) {
+  for (const folder of [physics, population, emitter, interaction, burst, clumps, light, floor, look, tone]) {
     folder.close()
   }
 

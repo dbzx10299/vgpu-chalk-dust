@@ -16,12 +16,12 @@ import noiseWgsl from './noise.wgsl?raw'
 import renderWgsl from './render.wgsl?raw'
 import simWgsl from './sim.wgsl?raw'
 
-export const MAX_PARTICLES = 100_000
-const PARTICLE_BYTES = 48 // keep in sync with `Particle` in sim.wgsl / render.wgsl
+export const MAX_PARTICLES = 250_000
+const PARTICLE_BYTES = 56 // keep in sync with `Particle` in sim.wgsl / render.wgsl
 const WORKGROUP = 64
 
 export const defaultParams = {
-  count: 40_000,
+  count: 120_000,
   paused: false,
   timeScale: 0.4, // slow motion
 
@@ -39,16 +39,16 @@ export const defaultParams = {
   heavySize: 8,
 
   // Population
-  cloudRatio: 0.12,
+  cloudRatio: 0.03, // few but large puffs: smoke cost is fill rate, not count
   lifeMin: 4,
   lifeMax: 10,
   grainSizeMin: 0.5,
   grainSizeMax: 3.2,
-  cloudSizeMin: 50,
-  cloudSizeMax: 200,
-  chunkChance: 0.025,
-  chunkSizeMin: 4.5,
-  chunkSizeMax: 10,
+  cloudSizeMin: 90,
+  cloudSizeMax: 360,
+  chunkChance: 0.012,
+  chunkSizeMin: 6,
+  chunkSizeMax: 14,
 
   // Ambient emitter
   emitRate: 0,
@@ -64,13 +64,23 @@ export const defaultParams = {
   mouseSwirl: 0.6,
 
   // Bursts
-  burstFraction: 0.5,
-  burstSpeed: 1.6,
-  burstRadius: 0.04,
+  burstFraction: 0.9,
+  burstSpeed: 2,
+  burstRadius: 0.08,
   clapAngle: 0, // degrees; 0 = jets left and right
   jetSpread: 0.22,
-  clapPuff: 0.12,
-  burstLift: 0.2,
+  clapPuff: 0.3,
+  burstLift: 0,
+
+  // Clumps: groups of grains that fly as one lump, then crumble into falling powder
+  clumpChance: 0.45,
+  clumpRadius: 0.045,
+  clumpTilt: -15, // degrees; negative throws clumps downward
+  clumpBreakMin: 0.6,
+  clumpBreakMax: 2,
+  clumpGravity: 4,
+  clumpDrag: 1.2,
+  shatterSpeed: 0.1,
 
   // Lighting (positions in world units, x as a fraction of the half-width)
   lightX: 0.35,
@@ -96,17 +106,17 @@ export const defaultParams = {
 
   // Rendering
   renderScale: 0.75,
-  smokeScale: 0.33, // smoke is soft, so it renders at a fraction of the resolution
+  smokeScale: 0.25, // smoke is soft, so it renders at a fraction of the resolution
   sizeScale: 1,
-  grainOpacity: 1.1,
-  cloudOpacity: 0.03,
-  cloudGrowth: 2.5,
+  grainOpacity: 0.8,
+  cloudOpacity: 0.035,
+  cloudGrowth: 3,
   depthFade: 0.6,
   depthShrink: 0.5,
-  wispiness: 0.7,
+  wispiness: 0.85,
   speckle: 0.6,
   speckleScale: 9,
-  shutter: 0.02,
+  shutter: 0.04,
   focusDepth: 0.5,
   dofAmount: 4,
 
@@ -267,6 +277,14 @@ export class ChalkDust {
             jetSpread: p.jetSpread,
             clapPuff: p.clapPuff,
             burstLift: p.burstLift,
+            clumpChance: p.clumpChance,
+            clumpRadius: p.clumpRadius,
+            clumpTilt: (p.clumpTilt * Math.PI) / 180,
+            clumpBreakMin: p.clumpBreakMin,
+            clumpBreakMax: Math.max(p.clumpBreakMax, p.clumpBreakMin),
+            clumpGravity: p.clumpGravity,
+            clumpDrag: p.clumpDrag,
+            shatterSpeed: p.shatterSpeed,
             glintChance: p.glintChance,
             glintBoost: p.glintBoost,
             floorY: p.floor ? p.floorY : -100,

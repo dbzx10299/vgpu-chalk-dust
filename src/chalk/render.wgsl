@@ -13,6 +13,8 @@ struct Particle {
   seed: f32,
   burst: u32,
   bright: f32,
+  breakAt: f32,
+  _pad: f32,
 }
 
 struct View {

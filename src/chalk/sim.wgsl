@@ -12,6 +12,8 @@ struct Particle {
   seed: f32,
   burst: u32,    // last burst id this particle has seen
   bright: f32,
+  breakAt: f32,  // > 0 while bonded into a falling clump; the clump shatters at this age
+  _pad: f32,
 }
 
 struct Sim {
@@ -65,6 +67,15 @@ struct Sim {
   clapPuff: f32,
   burstLift: f32,
 
+  clumpChance: f32,
+  clumpRadius: f32,
+  clumpTilt: f32,
+  clumpBreakMin: f32,
+  clumpBreakMax: f32,
+  clumpGravity: f32,
+  clumpDrag: f32,
+  shatterSpeed: f32,
+
   glintChance: f32,
   glintBoost: f32,
 
@@ -75,6 +86,9 @@ struct Sim {
   liftThreshold: f32,
   settledAging: f32,
 }
+
+// Consecutive particles form a group; a burst selects whole groups, and some groups fly as one clump.
+const CLUMP_SIZE = 16u;
 
 @group(0) @binding(0) var<storage, read_write> particles: array<Particle>;
 @group(0) @binding(1) var<uniform> sim: Sim;
@@ -135,6 +149,7 @@ fn spawn(p: ptr<function, Particle>, st: ptr<function, u32>, isBurst: bool) {
     (*p).bright *= sim.glintBoost; // a few chalk crystals catch the light
   }
   (*p).life = 0.0;
+  (*p).breakAt = 0.0;
   (*p).maxLife = mix(sim.lifeMin, sim.lifeMax, rnd(st)) * select(1.0, 1.4, isCloud);
 
   let s = rnd(st);
@@ -151,19 +166,12 @@ fn spawn(p: ptr<function, Particle>, st: ptr<function, u32>, isBurst: bool) {
   if (isBurst) {
     // A clap squeezes chalk out of the gap between the palms: two opposite jets along the clap axis,
     // plus a puff that spills out in every direction. Smoke is split between the two.
-    var a: f32;
-    if (rnd(st) < select(sim.clapPuff, 0.35, isCloud)) {
-      a = rnd(st) * 6.2831853;
-    } else {
-      let side = select(0.0, 3.1415927, rnd(st) < 0.5);
-      a = sim.clapAngle + side + gauss(st) * sim.jetSpread;
-    }
-    let dir = vec2f(cos(a), sin(a));
+    let dir = clapDir(st, select(sim.clapPuff, 0.35, isCloud));
     let r = sqrt(rnd(st)) * sim.burstRadius;
     let ra = rnd(st) * 6.2831853;
     (*p).pos = sim.burstPos + vec2f(cos(ra), sin(ra)) * r;
     // Exponential speed distribution: most dust puffs gently, a few grains shoot far.
-    let speed = sim.burstSpeed * -log(max(rnd(st), 1e-4)) * select(1.0, 0.6, isCloud);
+    let speed = sim.burstSpeed * -log(max(rnd(st), 1e-4)) * select(1.0, 0.9, isCloud);
     (*p).vel = dir * speed + vec2f(0.0, sim.burstSpeed * sim.burstLift);
   } else {
     let o = vec2f(rnd(st), rnd(st)) * 2.0 - 1.0;
@@ -171,6 +179,74 @@ fn spawn(p: ptr<function, Particle>, st: ptr<function, u32>, isBurst: bool) {
     let up = sim.emitSpeed * (0.3 + rnd(st));
     (*p).vel = vec2f((rnd(st) - 0.5) * sim.emitSpeed, up) * select(1.0, 0.6, isCloud);
   }
+}
+
+// Direction a clap throws chalk: mostly along two opposite jets, some in every direction.
+fn clapDir(st: ptr<function, u32>, puff: f32) -> vec2f {
+  var a: f32;
+  if (rnd(st) < puff) {
+    a = rnd(st) * 6.2831853;
+  } else {
+    let side = select(0.0, 3.1415927, rnd(st) < 0.5);
+    a = sim.clapAngle + side + gauss(st) * sim.jetSpread;
+  }
+  return vec2f(cos(a), sin(a));
+}
+
+// A clump of block chalk: every member draws its trajectory from the shared group RNG `gst`,
+// so the group moves as one lump. Only the member's offset, look and break time come from `st`.
+// Returns false for members beyond this clump's random size; they spawn as loose powder instead.
+fn spawnClump(p: ptr<function, Particle>, gst: ptr<function, u32>, st: ptr<function, u32>, member: u32) -> bool {
+  // Thrown sideways along the jets and tilted down: heavy lumps don't float up like the powder.
+  let right = rnd(gst) < 0.5;
+  let spread = gauss(gst) * sim.jetSpread * 0.5;
+  let a = select(sim.clapAngle + 3.1415927 - sim.clumpTilt, sim.clapAngle + sim.clumpTilt, right) + spread;
+  let dir = vec2f(cos(a), sin(a));
+  let speed = sim.burstSpeed * (0.5 + 0.9 * rnd(gst));
+  let ra = rnd(gst) * 6.2831853;
+  let center = sim.burstPos + vec2f(cos(ra), sin(ra)) * sqrt(rnd(gst)) * sim.burstRadius;
+
+  // Random lumps: member count, size, elongation and orientation all vary per clump.
+  let members = u32(mix(5.0, f32(CLUMP_SIZE), rnd(gst)));
+  let s = rnd(gst);
+  let radius = sim.clumpRadius * (0.35 + 1.65 * s * s);
+  let stretch = mix(0.45, 1.0, rnd(gst));
+  let rot = rnd(gst) * 6.2831853;
+  let depth = rnd(gst);
+  let groupBreak = mix(sim.clumpBreakMin, sim.clumpBreakMax, rnd(gst));
+  if (member >= members) { return false; }
+
+  let g = clamp(vec2f(gauss(st), gauss(st)), vec2f(-2.0), vec2f(2.0));
+  let local = vec2f(g.x, g.y * stretch) * radius * 0.5;
+  let o = vec2f(cos(rot) * local.x - sin(rot) * local.y, sin(rot) * local.x + cos(rot) * local.y);
+
+  (*p).kind = 0.0;
+  (*p).depth = depth;
+  (*p).vel = dir * speed + vec2f(0.0, sim.burstSpeed * sim.burstLift);
+  (*p).pos = center + o;
+  (*p).seed = rnd(st);
+  (*p).bright = 0.6 + 0.4 * rnd(st);
+  (*p).size = mix(sim.grainSizeMin, sim.grainSizeMax * 1.3, rnd(st));
+  (*p).life = 0.0;
+  (*p).maxLife = mix(sim.lifeMin, sim.lifeMax, rnd(st));
+
+  // Gradual crumbling: outer grains shed first, the core holds together longest.
+  let edge = clamp(length(g) * 0.5, 0.0, 1.0);
+  (*p).breakAt = max(groupBreak * mix(1.0, 0.12, edge) * (0.75 + 0.5 * rnd(st)), 0.02);
+  return true;
+}
+
+// The clump crumbles: each fragment gets its own kick and from now on falls as loose powder.
+fn shatter(p: ptr<function, Particle>, st: ptr<function, u32>, onImpact: bool) {
+  let a = rnd(st) * 6.2831853;
+  var kick = vec2f(cos(a), sin(a)) * sim.shatterSpeed * (0.2 + rnd(st));
+  if (onImpact) {
+    // Hitting the floor splashes fragments sideways and a little up.
+    kick = vec2f(kick.x * 1.5, abs(kick.y) * 0.6);
+    (*p).vel = vec2f((*p).vel.x * 0.3, 0.0);
+  }
+  (*p).vel += kick;
+  (*p).breakAt = 0.0;
 }
 
 @compute @workgroup_size(64)
@@ -184,8 +260,12 @@ fn cs_main(@builtin(global_invocation_id) id: vec3u) {
 
   if (p.burst != sim.burstId) {
     p.burst = sim.burstId;
-    if (rnd(&st) < sim.burstFraction) {
-      spawn(&p, &st, true);
+    var gst = pcg(((i / CLUMP_SIZE) * 2654435761u) ^ pcg(sim.burstId * 97u + 13u));
+    if (rnd(&gst) < sim.burstFraction) {
+      let isClump = rnd(&gst) < sim.clumpChance;
+      if (!isClump || !spawnClump(&p, &gst, &st, i % CLUMP_SIZE)) {
+        spawn(&p, &st, true);
+      }
     }
   }
 
@@ -209,6 +289,25 @@ fn cs_main(@builtin(global_invocation_id) id: vec3u) {
 
   // Far particles rest higher, so settled dust forms a receding ground plane instead of a line.
   let floorY = sim.floorY + p.depth * sim.floorDepth;
+
+  if (p.breakAt > 0.0) {
+    if (p.life >= p.breakAt || length(wake) > sim.liftThreshold) {
+      shatter(&p, &st, false); // crumbles mid-fall, or the cursor knocks it apart
+    } else {
+      // Bonded: a dense lump ignores the air, so every member follows the identical trajectory.
+      p.vel.y -= sim.gravity * sim.clumpGravity * dt;
+      p.vel *= exp(-sim.clumpDrag * dt);
+      p.pos += p.vel * dt;
+      p.life += dt;
+      if (p.pos.y < floorY) {
+        p.pos.y = floorY + 0.002; // just above the floor, so the fragments start airborne
+        shatter(&p, &st, true);
+      }
+      particles[i] = p;
+      return;
+    }
+  }
+
   let onFloor = p.pos.y <= floorY + 1e-5;
 
   if (onFloor) {
