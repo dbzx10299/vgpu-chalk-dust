@@ -16,12 +16,18 @@ export function createChalkGui(dust: ChalkDust, onBurst: () => void): GUI {
   physics.add(p, 'cloudDrag', 0.1, 10, 0.1).name('cloud drag')
   physics.add(p, 'cloudLift', 0, 1.2, 0.01).name('cloud lift')
   physics.add(p, 'heavySize', 1, 20, 0.1).name('heavy size px')
-  physics.add(p, 'turbulence', 0, 3, 0.01).name('burst eddies')
-  physics.add(p, 'eddyDecay', 0.05, 5, 0.01).name('eddy decay (s)')
+  physics.add(p, 'subgrid', 0, 2, 0.01).name('small eddies')
   physics.add(p, 'stillAir', 0, 0.3, 0.001).name('room air motion')
   physics.add(p, 'diffusion', 0, 0.3, 0.001).name('smoke diffusion')
   physics.add(p, 'noiseScale', 0.1, 8, 0.01).name('eddy scale')
   physics.add(p, 'noiseSpeed', 0, 1, 0.01).name('eddy speed')
+
+  const air = gui.addFolder('Air (fluid)')
+  air.add(p, 'fluidRes', 16, 256, 1).name('grid rows')
+  air.add(p, 'airDamping', 0, 5, 0.01).name('damping')
+  air.add(p, 'vorticity', 0, 60, 0.1).name('vorticity')
+  air.add(p, 'pressureIterations', 2, 80, 2).name('pressure iterations')
+  air.add(p, 'pressureDecay', 0, 1, 0.01).name('pressure warm start')
 
   const population = gui.addFolder('Population')
   population.add(p, 'cloudRatio', 0, 0.5, 0.01).name('cloud ratio')
@@ -46,7 +52,7 @@ export function createChalkGui(dust: ChalkDust, onBurst: () => void): GUI {
   const interaction = gui.addFolder('Interaction')
   interaction.add(p, 'mouseRadius', 0.02, 1, 0.01).name('cursor radius')
   interaction.add(p, 'mouseStrength', 0, 4, 0.01).name('cursor push')
-  interaction.add(p, 'mouseSwirl', 0, 4, 0.01).name('cursor swirl')
+  interaction.add(p, 'mouseDrag', 0, 100, 0.1).name('cursor grip')
 
   const burst = gui.addFolder('Burst')
   burst.add(p, 'burstFraction', 0, 1, 0.01).name('particle share')
@@ -56,6 +62,8 @@ export function createChalkGui(dust: ChalkDust, onBurst: () => void): GUI {
   burst.add(p, 'jetSpread', 0, 1.5, 0.01).name('jet spread')
   burst.add(p, 'clapPuff', 0, 1, 0.01).name('omni puff share')
   burst.add(p, 'burstLift', -0.5, 1, 0.01).name('upward lift')
+  burst.add(p, 'burstAir', 0, 3, 0.01).name('air jet')
+  burst.add(p, 'burstAirRadius', 0.02, 0.5, 0.01).name('air jet radius')
 
   const clumps = gui.addFolder('Clumps')
   clumps.add(p, 'clumpChance', 0, 1, 0.01).name('clump share')
@@ -90,6 +98,9 @@ export function createChalkGui(dust: ChalkDust, onBurst: () => void): GUI {
   floor.add(p, 'floorFlatten', 0.1, 1, 0.01).name('flatten')
   floor.add(p, 'floorShade', 0, 1.5, 0.01).name('shade')
   floor.add(p, 'settledAging', 0, 1, 0.01).name('settled aging')
+  floor.add(p, 'floorBuildup', 0, 4, 0.01).name('buildup')
+  floor.add(p, 'floorTexture', 0, 1, 0.01).name('buildup texture')
+  floor.add({ sweep: () => dust.clearFloor() }, 'sweep').name('sweep floor')
 
   const look = gui.addFolder('Look')
   look.add(p, 'renderScale', 0.25, 1, 0.05).name('render scale')
@@ -114,7 +125,7 @@ export function createChalkGui(dust: ChalkDust, onBurst: () => void): GUI {
   tone.add(p, 'contrast', 0.3, 3, 0.01)
   tone.add(p, 'grain', 0, 1, 0.01).name('film grain')
 
-  for (const folder of [physics, population, emitter, interaction, burst, clumps, light, floor, look, tone]) {
+  for (const folder of [physics, air, population, emitter, interaction, burst, clumps, light, floor, look, tone]) {
     folder.close()
   }
 

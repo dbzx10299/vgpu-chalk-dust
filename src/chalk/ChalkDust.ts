@@ -12,6 +12,7 @@ import {
 } from 'vgpu'
 import type { FrameLoopHandle, Gpu, Surface, Target } from 'vgpu'
 import compositeWgsl from './composite.wgsl?raw'
+import fluidWgsl from './fluid.wgsl?raw'
 import noiseWgsl from './noise.wgsl?raw'
 import renderWgsl from './render.wgsl?raw'
 import simWgsl from './sim.wgsl?raw'
@@ -19,6 +20,9 @@ import simWgsl from './sim.wgsl?raw'
 export const MAX_PARTICLES = 250_000
 const PARTICLE_BYTES = 56 // keep in sync with `Particle` in sim.wgsl / render.wgsl
 const WORKGROUP = 64
+const MAX_FLUID_CELLS = 512 * 256
+const FLUID_WORKGROUP = 8
+const DEPOSIT_SIZE: [number, number] = [1024, 48] // floor layer cells: across the screen x floor depth
 
 export const defaultParams = {
   count: 120_000,
@@ -30,13 +34,19 @@ export const defaultParams = {
   grainDrag: 2,
   cloudDrag: 2.5,
   cloudLift: 0.9,
-  turbulence: 0.8,
-  eddyDecay: 0.8,
+  subgrid: 0.4,
   stillAir: 0,
   diffusion: 0.04,
   noiseScale: 3,
   noiseSpeed: 0.3,
   heavySize: 8,
+
+  // Air: Stable Fluids grid the chalk is carried by
+  fluidRes: 128, // cells across the viewport height
+  airDamping: 0.6,
+  vorticity: 12,
+  pressureIterations: 24,
+  pressureDecay: 0.8,
 
   // Population
   cloudRatio: 0.03, // few but large puffs: smoke cost is fill rate, not count
@@ -59,9 +69,9 @@ export const defaultParams = {
   emitterHeight: 0.05,
 
   // Interaction
-  mouseRadius: 0.25,
+  mouseRadius: 0.1,
   mouseStrength: 1.2,
-  mouseSwirl: 0.6,
+  mouseDrag: 25,
 
   // Bursts
   burstFraction: 0.9,
@@ -71,6 +81,8 @@ export const defaultParams = {
   jetSpread: 0.22,
   clapPuff: 0.3,
   burstLift: 0,
+  burstAir: 0.6,
+  burstAirRadius: 0.12,
 
   // Clumps: groups of grains that fly as one lump, then crumble into falling powder
   clumpChance: 0.45,
@@ -101,8 +113,10 @@ export const defaultParams = {
   floorDepth: 0.22,
   floorFriction: 12,
   landingDamping: 0.2,
-  liftThreshold: 0.6,
+  liftThreshold: 1.5,
   settledAging: 0.35,
+  floorBuildup: 1,
+  floorTexture: 0.5,
   floorFlatten: 0.45,
   floorShade: 0.6,
 
@@ -146,6 +160,17 @@ export class ChalkDust {
   private smoke!: Target // low-res smoke layer
   private loop?: FrameLoopHandle
   private sim!: ReturnType<typeof compute>
+  private fluidKernels!: ReturnType<typeof compute>[]
+  private advect!: ReturnType<typeof compute>
+  private vorticity!: ReturnType<typeof compute>
+  private confine!: ReturnType<typeof compute>
+  private divergence!: ReturnType<typeof compute>
+  private jacobi!: [ReturnType<typeof compute>, ReturnType<typeof compute>]
+  private project!: ReturnType<typeof compute>
+  private airVel!: ReturnType<typeof storage>
+  private pressure!: ReturnType<typeof storage>
+  private fluidSize: [number, number] = [0, 0]
+  private deposit!: ReturnType<typeof storage>
   private grains!: ReturnType<typeof draw>
   private smokeDraw!: ReturnType<typeof draw>
   private composite!: ReturnType<typeof effect>
@@ -156,9 +181,11 @@ export class ChalkDust {
   private burstPos: [number, number] = [0, 0]
   private burstFraction = 0
   private burstSpeed = 0
+  private burstAirPending = 0
 
   private pointer: [number, number] | null = null
   private lastPointer: [number, number] | null = null
+  private prevPointer: [number, number] | null = null
   private mouseVel: [number, number] = [0, 0]
 
   private readonly canvas: HTMLCanvasElement
@@ -195,7 +222,14 @@ export class ChalkDust {
     const state = storage(this.gpu, MAX_PARTICLES * PARTICLE_BYTES, 'read-write')
     state.write(new Float32Array((MAX_PARTICLES * PARTICLE_BYTES) / 4))
 
-    this.sim = compute(this.gpu, simWgsl, { label: 'chalk-sim', set: { particles: state } })
+    this.createFluid()
+    // (coverage, lit coverage) per floor cell, accumulated by the sim and drawn by the composite.
+    this.deposit = storage(this.gpu, DEPOSIT_SIZE[0] * DEPOSIT_SIZE[1] * 8, 'read-write')
+    this.clearFloor()
+    this.sim = compute(this.gpu, simWgsl, {
+      label: 'chalk-sim',
+      set: { particles: state, air: this.airVel, deposit: this.deposit },
+    })
     const layerDraw = (label: string) =>
       draw(this.gpu, {
         shader: renderWgsl,
@@ -234,6 +268,7 @@ export class ChalkDust {
       const count = Math.min(Math.floor(p.count), MAX_PARTICLES)
 
       if (!p.paused) {
+        this.stepFluid(dt, aspect)
         this.sim.set({
           sim: {
             time: simTime,
@@ -245,8 +280,7 @@ export class ChalkDust {
             grainDrag: p.grainDrag,
             cloudDrag: p.cloudDrag,
             cloudLift: p.cloudLift,
-            turbulence: p.turbulence,
-            eddyDecay: Math.max(p.eddyDecay, 0.01),
+            subgrid: p.subgrid,
             stillAir: p.stillAir,
             diffusion: p.diffusion,
             heavySize: p.heavySize,
@@ -266,11 +300,8 @@ export class ChalkDust {
             emitSpeed: p.emitSpeed,
             emitter: [p.emitterX * aspect, p.emitterY],
             emitterSize: [p.emitterWidth * aspect, p.emitterHeight],
-            mouse: this.pointer ?? [1e4, 1e4],
-            mouseVel: this.mouseVel,
-            mouseRadius: p.mouseRadius,
-            mouseStrength: p.mouseStrength,
-            mouseSwirl: p.mouseSwirl,
+            fluidSize: this.fluidSize,
+            fluidCell: 2 / this.fluidSize[1],
             burstPos: this.burstPos,
             burstId: this.burstId,
             burstFraction: this.burstFraction,
@@ -296,6 +327,7 @@ export class ChalkDust {
             landingDamping: p.landingDamping,
             liftThreshold: p.liftThreshold,
             settledAging: p.settledAging,
+            depositSize: DEPOSIT_SIZE,
           },
         })
         // Dispatch submits on its own, ahead of this frame's render passes.
@@ -303,6 +335,12 @@ export class ChalkDust {
       }
 
       const dpr = this.output.dpr
+      // A grain's coverage is ~0.45π r² output px², flattened on the floor; spread over one deposit cell.
+      const [outW, outH] = this.output.size
+      const cellPx = (outW / DEPOSIT_SIZE[0]) * ((p.floorDepth * 0.5 * outH) / DEPOSIT_SIZE[1])
+      const grainPx = p.sizeScale * dpr
+      const depositScale =
+        (p.floorBuildup * 0.45 * Math.PI * grainPx * grainPx * p.floorFlatten * p.grainOpacity) / Math.max(cellPx, 1e-6)
       const lightPos: [number, number] = [p.lightX * aspect, p.lightY]
       const view = {
         aspect,
@@ -347,6 +385,16 @@ export class ChalkDust {
           floorY: p.floorY + p.floorDepth * 0.5,
           floorGlow: p.floor ? p.floorGlow : 0,
           floorGlowHeight: p.floorGlowHeight,
+          floorBase: p.floor ? p.floorY : -100,
+          floorDepth: Math.max(p.floorDepth, 1e-3),
+          depositSize: DEPOSIT_SIZE,
+          depositScale,
+          depthShrink: p.depthShrink,
+          depthFade: p.depthFade,
+          ambientLight: p.ambientLight,
+          lightIntensity: p.lightIntensity,
+          floorShade: p.floorShade,
+          floorTexture: p.floorTexture,
         },
       })
 
@@ -368,6 +416,7 @@ export class ChalkDust {
     this.burstFraction = Math.min(this.params.burstFraction * strength, 1)
     this.burstSpeed = this.params.burstSpeed * Math.sqrt(strength)
     this.burstId = (this.burstId + 1) >>> 0
+    this.burstAirPending = this.burstSpeed
   }
 
   /** Burst from the centre of an element, e.g. behind a headline or product shot. */
@@ -376,12 +425,98 @@ export class ChalkDust {
     this.burstAt(r.left + r.width / 2, r.top + r.height / 2, strength)
   }
 
+  /** Sweeps away all the chalk that has built up on the floor. */
+  clearFloor(): void {
+    this.deposit.write(new Uint32Array(DEPOSIT_SIZE[0] * DEPOSIT_SIZE[1] * 2))
+  }
+
   dispose(): void {
     this.loop?.stop()
     window.removeEventListener('pointermove', this.onPointerMove)
     window.removeEventListener('pointerdown', this.onPointerDown)
     document.removeEventListener('pointerleave', this.onPointerLeave)
     this.gpu?.dispose()
+  }
+
+  private createFluid(): void {
+    const field = (bytesPerCell: number) => {
+      const buf = storage(this.gpu, MAX_FLUID_CELLS * bytesPerCell, 'read-write')
+      buf.write(new Float32Array((MAX_FLUID_CELLS * bytesPerCell) / 4))
+      return buf
+    }
+    const velA = field(8)
+    const velB = field(8)
+    const curl = field(4)
+    const div = field(4)
+    const pA = field(4)
+    const pB = field(4)
+    this.airVel = velA
+    this.pressure = pA
+
+    const kernel = (entry: string, set: Record<string, unknown>) =>
+      compute(this.gpu, fluidWgsl, { label: `chalk-fluid-${entry}`, entry, set })
+    this.advect = kernel('advect', { velSrc: velA, velDst: velB })
+    this.vorticity = kernel('vorticity', { velSrc: velB, curlField: curl })
+    this.confine = kernel('confine', { velSrc: velB, curlField: curl, velDst: velA })
+    this.divergence = kernel('divergence', { velSrc: velA, divField: div, pressureDst: pA })
+    this.jacobi = [
+      kernel('jacobi', { pressureSrc: pA, pressureDst: pB, divField: div }),
+      kernel('jacobi', { pressureSrc: pB, pressureDst: pA, divField: div }),
+    ]
+    this.project = kernel('project', { pressureSrc: pA, velDst: velA })
+    this.fluidKernels = [this.advect, this.vorticity, this.confine, this.divergence, ...this.jacobi, this.project]
+  }
+
+  /** One Stable Fluids step: the air the particles are about to sample. */
+  private stepFluid(dt: number, aspect: number): void {
+    const p = this.params
+    let rows = Math.max(8, Math.round(p.fluidRes))
+    let cols = Math.ceil(aspect * rows)
+    if (cols * rows > MAX_FLUID_CELLS) {
+      rows = Math.floor(Math.sqrt(MAX_FLUID_CELLS / aspect))
+      cols = Math.min(Math.ceil(aspect * rows), Math.floor(MAX_FLUID_CELLS / rows))
+    }
+    if (cols !== this.fluidSize[0] || rows !== this.fluidSize[1]) {
+      // The cell layout changed, so the old field is meaningless: start from still air.
+      this.fluidSize = [cols, rows]
+      this.airVel.write(new Float32Array(MAX_FLUID_CELLS * 2))
+      this.pressure.write(new Float32Array(MAX_FLUID_CELLS))
+    }
+
+    const clap = (p.clapAngle * Math.PI) / 180
+    const fluid = {
+      size: this.fluidSize,
+      cell: 2 / rows,
+      dt,
+      aspect,
+      floorY: p.floor ? p.floorY : -100,
+      damping: p.airDamping,
+      vorticity: p.vorticity,
+      pressureDecay: p.pressureDecay,
+      mouse: this.pointer ?? [1e4, 1e4],
+      mousePrev: this.pointer ? (this.prevPointer ?? this.pointer) : [1e4, 1e4],
+      mouseVel: this.mouseVel,
+      mouseRadius: Math.max(p.mouseRadius, 1e-3),
+      mouseStrength: p.mouseStrength,
+      mouseDrag: p.mouseDrag,
+      burstPos: this.burstPos,
+      burstAxis: [Math.cos(clap), Math.sin(clap)],
+      burstAir: this.burstAirPending * p.burstAir,
+      burstAirRadius: Math.max(p.burstAirRadius, 1e-3),
+    }
+    this.burstAirPending = 0
+    for (const k of this.fluidKernels) k.set({ fluid })
+
+    const gx = Math.ceil(cols / FLUID_WORKGROUP)
+    const gy = Math.ceil(rows / FLUID_WORKGROUP)
+    this.advect.dispatch(gx, gy)
+    this.vorticity.dispatch(gx, gy)
+    this.confine.dispatch(gx, gy)
+    this.divergence.dispatch(gx, gy)
+    // Even sweep count, so the solved pressure ends up back in the buffer `project` reads.
+    const sweeps = Math.max(2, Math.round(p.pressureIterations / 2) * 2)
+    for (let i = 0; i < sweeps; i++) this.jacobi[i % 2].dispatch(gx, gy)
+    this.project.dispatch(gx, gy)
   }
 
   private layerSize(s: number): [number, number] {
@@ -406,7 +541,7 @@ export class ChalkDust {
   }
 
   private bindLayers(): void {
-    this.composite.set({ src: this.accum, smoke: this.smoke, samp: this.linear })
+    this.composite.set({ src: this.accum, smoke: this.smoke, samp: this.linear, deposit: this.deposit })
   }
 
   private toWorld(clientX: number, clientY: number): [number, number] {
@@ -432,6 +567,7 @@ export class ChalkDust {
         vy *= max / speed
       }
     }
+    this.prevPointer = this.lastPointer ?? this.pointer
     this.lastPointer = this.pointer
     const k = 1 - Math.exp(-dt * 20)
     this.mouseVel = [

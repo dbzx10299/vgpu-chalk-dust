@@ -27,8 +27,7 @@ struct Sim {
   grainDrag: f32,
   cloudDrag: f32,
   cloudLift: f32,
-  turbulence: f32,   // eddies stirred up by a burst; they decay, the room air itself is still
-  eddyDecay: f32,
+  subgrid: f32,      // small eddies the fluid grid is too coarse to resolve, scaled by local air speed
   stillAir: f32,
   diffusion: f32,
   noiseScale: f32,
@@ -51,11 +50,8 @@ struct Sim {
   emitter: vec2f,
   emitterSize: vec2f,
 
-  mouse: vec2f,
-  mouseVel: vec2f,
-  mouseRadius: f32,
-  mouseStrength: f32,
-  mouseSwirl: f32,
+  fluidSize: vec2u,
+  fluidCell: f32,
 
   burstPos: vec2f,
   burstId: u32,
@@ -85,6 +81,7 @@ struct Sim {
   landingDamping: f32,
   liftThreshold: f32,
   settledAging: f32,
+  depositSize: vec2u,
 }
 
 // Consecutive particles form a group; a burst selects whole groups, and some groups fly as one clump.
@@ -92,6 +89,25 @@ const CLUMP_SIZE = 16u;
 
 @group(0) @binding(0) var<storage, read_write> particles: array<Particle>;
 @group(0) @binding(1) var<uniform> sim: Sim;
+@group(0) @binding(2) var<storage, read> air: array<vec2f>; // fluid.wgsl velocity grid
+// Chalk that has built up on the floor, drawn by composite.wgsl. Cells span x across the screen and y
+// across floor depth; each holds (coverage, lit coverage) in DEPOSIT_UNIT fixed point.
+@group(0) @binding(3) var<storage, read_write> deposit: array<atomic<u32>>;
+
+const DEPOSIT_UNIT = 65536.0; // keep in sync with composite.wgsl
+
+fn airAt(p: vec2f) -> vec2f {
+  let size = vec2i(sim.fluidSize);
+  let g = clamp((p - vec2f(-sim.aspect, -1.0)) / sim.fluidCell - 0.5, vec2f(0.0), vec2f(size - 1));
+  let i0 = vec2i(floor(g));
+  let i1 = min(i0 + 1, size - 1);
+  let f = g - vec2f(i0);
+  let a = air[i0.y * size.x + i0.x];
+  let b = air[i0.y * size.x + i1.x];
+  let c = air[i1.y * size.x + i0.x];
+  let d = air[i1.y * size.x + i1.x];
+  return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
 
 fn pcg(v: u32) -> u32 {
   let s = v * 747796405u + 2891336453u;
@@ -251,6 +267,25 @@ fn shatter(p: ptr<function, Particle>, st: ptr<function, u32>, onImpact: bool) {
   (*p).breakAt = 0.0;
 }
 
+// Matches the grain fade-out in render.wgsl.
+fn grainFade(life: f32, maxLife: f32) -> f32 {
+  return 1.0 - smoothstep(0.55, 1.0, life / maxLife);
+}
+
+// Hands `share` of a resting grain's visible dust over to the floor layer, so as the grain fades
+// out (or is recycled by a burst) the floor keeps exactly what it showed and fills up over time.
+fn depositGrain(p: Particle, share: f32, st: ptr<function, u32>) {
+  if (p.kind > 0.5 || share <= 0.0) { return; }
+  let u = p.pos.x / sim.aspect * 0.5 + 0.5;
+  if (u < 0.0 || u >= 1.0) { return; }
+  let cell = vec2u(vec2f(u, clamp(p.depth, 0.0, 0.999)) * vec2f(sim.depositSize));
+  let i = (cell.y * sim.depositSize.x + cell.x) * 2u;
+  // Stochastic rounding, so tiny per-frame shares still add up on average instead of truncating away.
+  let coverage = share * p.size * p.size * DEPOSIT_UNIT;
+  atomicAdd(&deposit[i], u32(coverage + rnd(st)));
+  atomicAdd(&deposit[i + 1u], u32(coverage * p.bright + rnd(st)));
+}
+
 @compute @workgroup_size(64)
 fn cs_main(@builtin(global_invocation_id) id: vec3u) {
   let i = id.x;
@@ -264,6 +299,9 @@ fn cs_main(@builtin(global_invocation_id) id: vec3u) {
     p.burst = sim.burstId;
     var gst = pcg(((i / CLUMP_SIZE) * 2654435761u) ^ pcg(sim.burstId * 97u + 13u));
     if (rnd(&gst) < sim.burstFraction) {
+      if (p.grounded > 0.5 && p.life < p.maxLife) {
+        depositGrain(p, grainFade(p.life, p.maxLife), &st); // its dust stays on the floor
+      }
       let isClump = rnd(&gst) < sim.clumpChance;
       if (!isClump || !spawnClump(&p, &gst, &st, i % CLUMP_SIZE)) {
         spawn(&p, &st, true);
@@ -282,19 +320,14 @@ fn cs_main(@builtin(global_invocation_id) id: vec3u) {
 
   let isCloud = p.kind > 0.5;
 
-  let d = p.pos - sim.mouse;
-  let r2 = dot(d, d);
-  let falloff = exp(-r2 / (sim.mouseRadius * sim.mouseRadius));
-  let mouseSpeed = length(sim.mouseVel);
-  let tangent = vec2f(-d.y, d.x) / max(sqrt(r2), 1e-3);
-  let wake = (sim.mouseVel * sim.mouseStrength + tangent * mouseSpeed * sim.mouseSwirl) * falloff;
+  let flow = airAt(p.pos);
 
   // Far particles rest higher, so settled dust forms a receding ground plane instead of a line.
   let floorY = sim.floorY + p.depth * sim.floorDepth;
 
   if (p.breakAt > 0.0) {
-    if (p.life >= p.breakAt || length(wake) > sim.liftThreshold) {
-      shatter(&p, &st, false); // crumbles mid-fall, or the cursor knocks it apart
+    if (p.life >= p.breakAt || length(flow - p.vel) > sim.liftThreshold) {
+      shatter(&p, &st, false); // crumbles mid-fall, or a gust (e.g. the cursor) knocks it apart
     } else {
       // Bonded: a dense lump ignores the air, so every member follows the identical trajectory.
       p.vel.y -= sim.gravity * sim.clumpGravity * dt;
@@ -318,12 +351,14 @@ fn cs_main(@builtin(global_invocation_id) id: vec3u) {
     p.pos += p.vel * dt;
     p.pos.y = floorY;
     p.grounded = 1.0;
-    p.life += dt * sim.settledAging; // settled chalk lingers before it fades
+    let fadeBefore = grainFade(p.life, p.maxLife);
+    p.life += dt * sim.settledAging; // settled chalk lingers before it fades into the floor layer
+    depositGrain(p, fadeBefore - grainFade(p.life, p.maxLife), &st);
   } else {
-    // No wind: the only air motion is the eddying a burst kicks up, which dies out with the
-    // particle's age, plus whatever the cursor stirs.
-    let eddy = sim.turbulence * exp(-p.life / sim.eddyDecay) + sim.stillAir;
-    let air = curl(p.pos * sim.noiseScale + p.depth * 3.0, sim.time * sim.noiseSpeed) * eddy + wake;
+    // The air is the fluid grid, stirred by claps and the cursor. Where it moves fast it is also turbulent
+    // below the grid's resolution, so add curl noise there; the room air itself is otherwise still.
+    let eddy = sim.subgrid * length(flow) + sim.stillAir;
+    let air = flow + curl(p.pos * sim.noiseScale + p.depth * 3.0, sim.time * sim.noiseSpeed) * eddy;
 
     // Stokes-like settling: bigger pieces fall faster and shrug off the air; smoke barely sinks.
     let heavy = clamp(p.size / sim.heavySize, 0.0, 1.0);
