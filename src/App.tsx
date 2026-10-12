@@ -30,7 +30,6 @@ function App() {
 
       const burstHeadline = () => headlineRef.current && dust.burstAtElement(headlineRef.current, 1.2)
       const gui = createChalkGui(dust, burstHeadline)
-      dust.autoClapElement = headlineRef.current
       setTimeout(burstHeadline, 300) // intro puff behind the headline
 
       // Scroll-triggered burst behind the product, once each time it enters view.

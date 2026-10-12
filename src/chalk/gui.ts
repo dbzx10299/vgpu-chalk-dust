@@ -8,7 +8,6 @@ export function createChalkGui(dust: ChalkDust, onBurst: () => void): GUI {
   gui.add(p, 'count', 1000, MAX_PARTICLES, 1000).name('particles')
   gui.add(p, 'paused')
   gui.add(p, 'timeScale', 0, 2, 0.01).name('time scale (slow-mo)')
-  gui.add(p, 'autoClap', 0, 20, 0.5).name('auto clap every (s)')
   gui.add({ burst: onBurst }, 'burst').name('burst at headline')
 
   const physics = gui.addFolder('Physics')

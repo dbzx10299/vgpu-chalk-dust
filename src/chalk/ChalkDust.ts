@@ -24,7 +24,6 @@ export const defaultParams = {
   count: 40_000,
   paused: false,
   timeScale: 0.4, // slow motion
-  autoClap: 6, // seconds between claps behind the headline; 0 = off
 
   // Physics (world units: 1 = half the viewport height)
   gravity: 0.35,
@@ -144,10 +143,6 @@ export class ChalkDust {
   private burstPos: [number, number] = [0, 0]
   private burstFraction = 0
   private burstSpeed = 0
-  private lastBurstAt = performance.now()
-
-  /** Element the periodic clap (`params.autoClap`) bursts behind. */
-  autoClapElement: Element | null = null
 
   private pointer: [number, number] | null = null
   private lastPointer: [number, number] | null = null
@@ -221,9 +216,6 @@ export class ChalkDust {
       simTime += dt
       this.syncAccumSize()
       this.updateInteraction(dt)
-      if (p.autoClap > 0 && this.autoClapElement && performance.now() - this.lastBurstAt > p.autoClap * 1000) {
-        this.burstAtElement(this.autoClapElement, 1.2)
-      }
 
       const aspect = this.output.size[0] / this.output.size[1]
       const count = Math.min(Math.floor(p.count), MAX_PARTICLES)
@@ -352,7 +344,6 @@ export class ChalkDust {
     this.burstFraction = Math.min(this.params.burstFraction * strength, 1)
     this.burstSpeed = this.params.burstSpeed * Math.sqrt(strength)
     this.burstId = (this.burstId + 1) >>> 0
-    this.lastBurstAt = performance.now()
   }
 
   /** Burst from the centre of an element, e.g. behind a headline or product shot. */
