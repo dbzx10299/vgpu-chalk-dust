@@ -76,7 +76,7 @@ function App() {
         <section className="product" id="produkt">
           <div ref={productRef} className="product-card">
             <span className="eyebrow">Neu</span>
-            <h2>Olympic Barbell 20 kg</h2>
+            <h2 style={{ textShadow: '0 0 12px hsl(0 0% 0% / 30%)'}}>Olympic Barbell 20 kg</h2>
             <p>Scroll hierher und der Kreidestaub explodiert hinter dem Produkt.</p>
           </div>
         </section>
