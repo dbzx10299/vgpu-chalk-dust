@@ -111,12 +111,13 @@ export const defaultParams = {
   floor: true,
   floorY: -0.78,
   floorDepth: 0.22,
+  perspective: 1, // depth 1 is twice as far from the camera as depth 0, so it looks half the size
   floorFriction: 12,
   landingDamping: 0.2,
   liftThreshold: 1.5,
   settledAging: 0.35,
   floorBuildup: 1,
-  floorTexture: 0.5,
+  floorTexture: 0.85,
   floorFlatten: 0.45,
   floorShade: 0.6,
 
@@ -128,7 +129,6 @@ export const defaultParams = {
   cloudOpacity: 0.035,
   cloudGrowth: 3,
   depthFade: 0.6,
-  depthShrink: 0.5,
   wispiness: 0.85,
   speckle: 0.6,
   speckleScale: 9,
@@ -271,7 +271,13 @@ export class ChalkDust {
 
       const aspect = this.output.size[0] / this.output.size[1]
       const count = Math.min(Math.floor(p.count), MAX_PARTICLES)
-      const floorY = this.floorWorldY()
+      const floorLine = this.floorLineY()
+      const floorY = p.floor ? floorLine : -100
+      // Camera: the floor band spans floorDepth on screen from depth 0 to depth 1 and recedes toward the
+      // horizon, which follows the page like the floor does.
+      const perspective = Math.max(p.perspective, 0.05)
+      const floorBand = Math.max(p.floorDepth, 1e-3)
+      const horizon = floorLine + (floorBand * (1 + perspective)) / perspective
 
       if (!p.paused) {
         this.stepFluid(dt, aspect, floorY)
@@ -328,7 +334,8 @@ export class ChalkDust {
             glintChance: p.glintChance,
             glintBoost: p.glintBoost,
             floorY,
-            floorDepth: p.floorDepth,
+            horizon,
+            perspective,
             floorFriction: p.floorFriction,
             landingDamping: p.landingDamping,
             liftThreshold: p.liftThreshold,
@@ -344,8 +351,10 @@ export class ChalkDust {
 
       const dpr = this.output.dpr
       // A grain's coverage is ~0.45π r² output px², flattened on the floor; spread over one deposit cell.
+      // Both shrink with depth alike, so measure the cell at the front edge, where a depth row spans
+      // floorDepth * (1 + perspective) / rows of screen height.
       const [outW, outH] = this.output.size
-      const cellPx = (outW / DEPOSIT_SIZE[0]) * ((p.floorDepth * 0.5 * outH) / DEPOSIT_SIZE[1])
+      const cellPx = (outW / DEPOSIT_SIZE[0]) * ((floorBand * (1 + perspective) * 0.5 * outH) / DEPOSIT_SIZE[1])
       const grainPx = p.sizeScale * dpr
       const depositScale =
         (p.floorBuildup * 0.45 * Math.PI * grainPx * grainPx * p.floorFlatten * p.grainOpacity) / Math.max(cellPx, 1e-6)
@@ -357,7 +366,8 @@ export class ChalkDust {
         cloudOpacity: p.cloudOpacity,
         cloudGrowth: p.cloudGrowth,
         depthFade: p.depthFade,
-        depthShrink: p.depthShrink,
+        horizon,
+        perspective,
         wispiness: p.wispiness,
         speckle: p.speckle,
         speckleScale: p.speckleScale,
@@ -394,15 +404,19 @@ export class ChalkDust {
           floorGlow: p.floor ? p.floorGlow : 0,
           floorGlowHeight: p.floorGlowHeight,
           floorBase: floorY,
-          floorDepth: Math.max(p.floorDepth, 1e-3),
+          floorDepth: floorBand,
+          horizon,
+          perspective,
           depositSize: DEPOSIT_SIZE,
           depositScale,
-          depthShrink: p.depthShrink,
           depthFade: p.depthFade,
           ambientLight: p.ambientLight,
           lightIntensity: p.lightIntensity,
           floorShade: p.floorShade,
           floorTexture: p.floorTexture,
+          pxPerUnit: outH * 0.5,
+          speckPx: 2.4 * grainPx,
+          floorFlatten: p.floorFlatten,
         },
       })
 
@@ -485,19 +499,18 @@ export class ChalkDust {
   }
 
   /**
-   * Floor height in world units this frame, or far below the screen when the floor is off. With an
-   * anchor, `floorY` is measured from the anchor's bottom edge instead of the bottom of the viewport,
-   * and the distance the anchor moved since the last frame is queued up as a scroll shift for the sim.
+   * Screen height of the floor's front edge this frame, whether or not the floor is on. With an anchor,
+   * `floorY` is measured from the anchor's bottom edge instead of the bottom of the viewport, and the
+   * distance the anchor moved since the last frame is queued up as a scroll shift for the sim.
    */
-  private floorWorldY(): number {
-    const p = this.params
+  private floorLineY(): number {
     let anchorBottom = -1
     if (this.floorAnchor) {
       anchorBottom = this.toWorld(0, this.floorAnchor.getBoundingClientRect().bottom)[1]
       if (this.lastAnchorBottom !== null) this.pendingScroll += anchorBottom - this.lastAnchorBottom
       this.lastAnchorBottom = anchorBottom
     }
-    return p.floor ? p.floorY + anchorBottom + 1 : -100
+    return this.params.floorY + anchorBottom + 1
   }
 
   /** One Stable Fluids step: the air the particles are about to sample. */

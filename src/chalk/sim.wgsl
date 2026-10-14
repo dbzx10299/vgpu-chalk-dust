@@ -1,5 +1,7 @@
 // Chalk dust simulation. One invocation per particle, updated in place.
-// World space: y in [-1, 1] (up), x in [-aspect, aspect].
+// Screen space: y in [-1, 1] (up), x in [-aspect, aspect]. Particles live in world space at their depth,
+// which `project` maps to the screen with a pinhole camera: at depth 0 world and screen coincide, and
+// deeper particles shrink toward the horizon, so far chalk moves slower and lands higher up the floor.
 
 struct Particle {
   pos: vec2f,
@@ -75,8 +77,9 @@ struct Sim {
   glintChance: f32,
   glintBoost: f32,
 
-  floorY: f32,
-  floorDepth: f32,
+  floorY: f32,       // world height of the floor plane: every depth lands on it
+  horizon: f32,      // screen height the floor recedes toward
+  perspective: f32,  // depth 1 is (1 + perspective) times as far from the camera as depth 0
   floorFriction: f32,
   landingDamping: f32,
   liftThreshold: f32,
@@ -96,6 +99,21 @@ const CLUMP_SIZE = 16u;
 @group(0) @binding(3) var<storage, read_write> deposit: array<atomic<u32>>;
 
 const DEPOSIT_UNIT = 65536.0; // keep in sync with composite.wgsl
+
+// On-screen scale of things at this depth. Keep the projection in sync with render.wgsl and composite.wgsl.
+fn depthScale(depth: f32) -> f32 {
+  return 1.0 / (1.0 + sim.perspective * depth);
+}
+
+fn project(p: vec2f, depth: f32) -> vec2f {
+  let v = vec2f(0.0, sim.horizon);
+  return v + (p - v) * depthScale(depth);
+}
+
+fn unproject(s: vec2f, depth: f32) -> vec2f {
+  let v = vec2f(0.0, sim.horizon);
+  return v + (s - v) / depthScale(depth);
+}
 
 fn airAt(p: vec2f) -> vec2f {
   let size = vec2i(sim.fluidSize);
@@ -187,13 +205,14 @@ fn spawn(p: ptr<function, Particle>, st: ptr<function, u32>, isBurst: bool) {
     let dir = clapDir(st, select(sim.clapPuff, 0.35, isCloud));
     let r = sqrt(rnd(st)) * sim.burstRadius;
     let ra = rnd(st) * 6.2831853;
-    (*p).pos = sim.burstPos + vec2f(cos(ra), sin(ra)) * r;
+    // Behind the clicked point at this particle's depth, so the whole cloud starts under the cursor.
+    (*p).pos = unproject(sim.burstPos, (*p).depth) + vec2f(cos(ra), sin(ra)) * r;
     // Exponential speed distribution: most dust puffs gently, a few grains shoot far.
     let speed = sim.burstSpeed * -log(max(rnd(st), 1e-4)) * select(1.0, 0.9, isCloud);
     (*p).vel = dir * speed + vec2f(0.0, sim.burstSpeed * sim.burstLift);
   } else {
     let o = vec2f(rnd(st), rnd(st)) * 2.0 - 1.0;
-    (*p).pos = sim.emitter + o * sim.emitterSize;
+    (*p).pos = unproject(sim.emitter + o * sim.emitterSize, (*p).depth);
     let up = sim.emitSpeed * (0.3 + rnd(st));
     (*p).vel = vec2f((rnd(st) - 0.5) * sim.emitSpeed, up) * select(1.0, 0.6, isCloud);
   }
@@ -222,7 +241,8 @@ fn spawnClump(p: ptr<function, Particle>, gst: ptr<function, u32>, st: ptr<funct
   let dir = vec2f(cos(a), sin(a));
   let speed = sim.burstSpeed * (0.5 + 0.9 * rnd(gst));
   let ra = rnd(gst) * 6.2831853;
-  let center = sim.burstPos + vec2f(cos(ra), sin(ra)) * sqrt(rnd(gst)) * sim.burstRadius;
+  let depth = rnd(gst);
+  let center = unproject(sim.burstPos, depth) + vec2f(cos(ra), sin(ra)) * sqrt(rnd(gst)) * sim.burstRadius;
 
   // Random lumps: member count, size, elongation and orientation all vary per clump.
   let members = u32(mix(5.0, f32(CLUMP_SIZE), rnd(gst)));
@@ -230,7 +250,6 @@ fn spawnClump(p: ptr<function, Particle>, gst: ptr<function, u32>, st: ptr<funct
   let radius = sim.clumpRadius * (0.35 + 1.65 * s * s);
   let stretch = mix(0.45, 1.0, rnd(gst));
   let rot = rnd(gst) * 6.2831853;
-  let depth = rnd(gst);
   let groupBreak = mix(sim.clumpBreakMin, sim.clumpBreakMax, rnd(gst));
   if (member >= members) { return false; }
 
@@ -277,7 +296,7 @@ fn grainFade(life: f32, maxLife: f32) -> f32 {
 // out (or is recycled by a burst) the floor keeps exactly what it showed and fills up over time.
 fn depositGrain(p: Particle, share: f32, st: ptr<function, u32>) {
   if (p.kind > 0.5 || share <= 0.0) { return; }
-  let u = p.pos.x / sim.aspect * 0.5 + 0.5;
+  let u = project(p.pos, p.depth).x / sim.aspect * 0.5 + 0.5;
   if (u < 0.0 || u >= 1.0) { return; }
   let cell = vec2u(vec2f(u, clamp(p.depth, 0.0, 0.999)) * vec2f(sim.depositSize));
   let i = (cell.y * sim.depositSize.x + cell.x) * 2u;
@@ -321,12 +340,15 @@ fn cs_main(@builtin(global_invocation_id) id: vec3u) {
 
   let isCloud = p.kind > 0.5;
 
-  let flow = airAt(p.pos);
+  // The air grid covers the screen, so read it where the particle appears; it moves the particle in its
+  // own depth plane, so the same gust shifts far dust less on screen.
+  let flow = airAt(project(p.pos, p.depth));
 
-  // Far particles rest higher, so settled dust forms a receding ground plane instead of a line.
-  let floorY = sim.floorY + p.depth * sim.floorDepth;
+  // One floor plane for every depth: the projection is what makes far dust come to rest higher on screen.
+  let floorY = sim.floorY;
 
   // The dust lives in the page, not on the screen: it scrolls along with the hero and its floor.
+  // The horizon moves with the page too, so a uniform world shift is a uniform screen shift at any depth.
   // Below the floor is the rest of the page, so only dust falling onto it from above lands.
   if (p.grounded > 0.5) {
     p.pos.y = floorY;
@@ -389,7 +411,8 @@ fn cs_main(@builtin(global_invocation_id) id: vec3u) {
   }
 
   let margin = 0.4;
-  if (abs(p.pos.x) > sim.aspect + margin || p.pos.y > 1.0 + margin || p.pos.y < -1.0 - margin) {
+  let onScreen = project(p.pos, p.depth);
+  if (abs(onScreen.x) > sim.aspect + margin || onScreen.y > 1.0 + margin || onScreen.y < -1.0 - margin) {
     if (p.grounded > 0.5) {
       depositGrain(p, grainFade(p.life, p.maxLife), &st); // scrolled off with the floor: its dust stays on it
     }

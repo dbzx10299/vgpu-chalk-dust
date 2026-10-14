@@ -26,7 +26,8 @@ struct View {
   cloudOpacity: f32,
   cloudGrowth: f32,
   depthFade: f32,
-  depthShrink: f32,
+  horizon: f32,     // camera, as in sim.wgsl
+  perspective: f32,
   wispiness: f32,
   speckle: f32,
   speckleScale: f32,
@@ -81,13 +82,18 @@ fn vs_main(@builtin(vertex_index) v: u32, @builtin(instance_index) i: u32) -> Vs
   let fadeIn = smoothstep(0.0, select(0.03, 0.12, isCloud), t);
   let fadeOut = 1.0 - smoothstep(select(0.55, 0.35, isCloud), 1.0, t);
 
+  // Perspective: the same projection the sim uses, so things shrink and slow down with distance.
+  let scale = 1.0 / (1.0 + view.perspective * p.depth);
+  let vp = vec2f(0.0, view.horizon);
+  let screenPos = vp + (p.pos - vp) * scale;
+
   let growth = select(1.0, 1.0 + view.cloudGrowth * t, isCloud);
-  var sizePx = p.size * view.sizeScale * growth * mix(1.0, 1.0 - view.depthShrink, p.depth);
+  var sizePx = p.size * view.sizeScale * growth * scale;
 
   var alpha = fadeIn * fadeOut * mix(1.0, 1.0 - view.depthFade, p.depth);
 
   // Backlight: dust glows near the light and falls off into darkness. Haze scatters more than grains.
-  let toLight = p.pos - view.lightPos;
+  let toLight = screenPos - view.lightPos;
   let lit = exp(-dot(toLight, toLight) / (view.lightRadius * view.lightRadius));
   var light = view.ambientLight + view.lightIntensity * lit;
 
@@ -123,7 +129,7 @@ fn vs_main(@builtin(vertex_index) v: u32, @builtin(instance_index) i: u32) -> Vs
     }
 
     // Motion blur: stretch along the screen velocity, thinning so a streak carries the same light.
-    let velPx = p.vel * view.resolution.y * 0.5;
+    let velPx = p.vel * scale * view.resolution.y * 0.5;
     let speed = length(velPx);
     let dir = select(vec2f(1.0, 0.0), velPx / max(speed, 1e-4), speed > 1e-3);
     // Capped so a fast cursor flick can't draw long lines; resting dust never streaks.
@@ -138,7 +144,7 @@ fn vs_main(@builtin(vertex_index) v: u32, @builtin(instance_index) i: u32) -> Vs
     }
   }
 
-  let center = vec2f(p.pos.x / view.aspect, p.pos.y);
+  let center = vec2f(screenPos.x / view.aspect, screenPos.y);
   out.position = vec4f(center + offset / view.resolution, 0.0, 1.0);
   out.uv = c;
   out.alpha = alpha;
