@@ -63,7 +63,7 @@ function App() {
       <canvas ref={canvasRef} className="chalk-canvas" />
 
       <header className="site-header">
-        <span className="logo">HQ GERMANY</span>
+        <span className="logo">ACME Shop</span>
         <span className="cart">Warenkorb 0</span>
       </header>
 
