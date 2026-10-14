@@ -64,11 +64,6 @@ function App() {
     <>
       <canvas ref={canvasRef} className="chalk-canvas" />
 
-      <header className="site-header">
-        <span className="logo">ACME Shop</span>
-        <span className="cart">Warenkorb 0</span>
-      </header>
-
       <main>
         <section ref={heroRef} className="hero">
           <h1 ref={headlineRef}>Entwickelt für Dich.</h1>
