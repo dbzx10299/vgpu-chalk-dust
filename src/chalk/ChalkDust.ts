@@ -188,6 +188,11 @@ export class ChalkDust {
   private prevPointer: [number, number] | null = null
   private mouseVel: [number, number] = [0, 0]
 
+  // The floor sits a fixed height above this element's bottom edge, so it scrolls with the page.
+  private floorAnchor: Element | null = null
+  private lastAnchorBottom: number | null = null
+  private pendingScroll = 0
+
   private readonly canvas: HTMLCanvasElement
 
   constructor(canvas: HTMLCanvasElement) {
@@ -266,9 +271,10 @@ export class ChalkDust {
 
       const aspect = this.output.size[0] / this.output.size[1]
       const count = Math.min(Math.floor(p.count), MAX_PARTICLES)
+      const floorY = this.floorWorldY()
 
       if (!p.paused) {
-        this.stepFluid(dt, aspect)
+        this.stepFluid(dt, aspect, floorY)
         this.sim.set({
           sim: {
             time: simTime,
@@ -321,15 +327,17 @@ export class ChalkDust {
             shatterSpeed: p.shatterSpeed,
             glintChance: p.glintChance,
             glintBoost: p.glintBoost,
-            floorY: p.floor ? p.floorY : -100,
+            floorY,
             floorDepth: p.floorDepth,
             floorFriction: p.floorFriction,
             landingDamping: p.landingDamping,
             liftThreshold: p.liftThreshold,
             settledAging: p.settledAging,
+            scroll: this.pendingScroll,
             depositSize: DEPOSIT_SIZE,
           },
         })
+        this.pendingScroll = 0
         // Dispatch submits on its own, ahead of this frame's render passes.
         this.sim.dispatch(Math.ceil(count / WORKGROUP))
       }
@@ -382,10 +390,10 @@ export class ChalkDust {
           lightPos,
           lightRadius: p.lightRadius,
           atmosphere: p.atmosphere,
-          floorY: p.floorY + p.floorDepth * 0.5,
+          floorY: floorY + p.floorDepth * 0.5,
           floorGlow: p.floor ? p.floorGlow : 0,
           floorGlowHeight: p.floorGlowHeight,
-          floorBase: p.floor ? p.floorY : -100,
+          floorBase: floorY,
           floorDepth: Math.max(p.floorDepth, 1e-3),
           depositSize: DEPOSIT_SIZE,
           depositScale,
@@ -423,6 +431,15 @@ export class ChalkDust {
   burstAtElement(el: Element, strength = 1): void {
     const r = el.getBoundingClientRect()
     this.burstAt(r.left + r.width / 2, r.top + r.height / 2, strength)
+  }
+
+  /**
+   * Ties the floor to an element, e.g. the hero section: it sits `floorY` above the element's bottom
+   * edge and the dust scrolls along with the page. Pass null for a floor fixed to the viewport.
+   */
+  anchorFloor(el: Element | null): void {
+    this.floorAnchor = el
+    this.lastAnchorBottom = null
   }
 
   /** Sweeps away all the chalk that has built up on the floor. */
@@ -467,8 +484,24 @@ export class ChalkDust {
     this.fluidKernels = [this.advect, this.vorticity, this.confine, this.divergence, ...this.jacobi, this.project]
   }
 
+  /**
+   * Floor height in world units this frame, or far below the screen when the floor is off. With an
+   * anchor, `floorY` is measured from the anchor's bottom edge instead of the bottom of the viewport,
+   * and the distance the anchor moved since the last frame is queued up as a scroll shift for the sim.
+   */
+  private floorWorldY(): number {
+    const p = this.params
+    let anchorBottom = -1
+    if (this.floorAnchor) {
+      anchorBottom = this.toWorld(0, this.floorAnchor.getBoundingClientRect().bottom)[1]
+      if (this.lastAnchorBottom !== null) this.pendingScroll += anchorBottom - this.lastAnchorBottom
+      this.lastAnchorBottom = anchorBottom
+    }
+    return p.floor ? p.floorY + anchorBottom + 1 : -100
+  }
+
   /** One Stable Fluids step: the air the particles are about to sample. */
-  private stepFluid(dt: number, aspect: number): void {
+  private stepFluid(dt: number, aspect: number, floorY: number): void {
     const p = this.params
     let rows = Math.max(8, Math.round(p.fluidRes))
     let cols = Math.ceil(aspect * rows)
@@ -489,7 +522,7 @@ export class ChalkDust {
       cell: 2 / rows,
       dt,
       aspect,
-      floorY: p.floor ? p.floorY : -100,
+      floorY,
       damping: p.airDamping,
       vorticity: p.vorticity,
       pressureDecay: p.pressureDecay,

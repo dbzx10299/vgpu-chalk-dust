@@ -8,6 +8,7 @@ let lifecycle = Promise.resolve()
 
 function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const heroRef = useRef<HTMLElement>(null)
   const headlineRef = useRef<HTMLHeadingElement>(null)
   const productRef = useRef<HTMLDivElement>(null)
   const [error, setError] = useState<string | null>(null)
@@ -28,6 +29,7 @@ function App() {
       }
       if (cancelled) return
 
+      dust.anchorFloor(heroRef.current) // the floor belongs to the hero and scrolls away with it
       const burstHeadline = () => headlineRef.current && dust.burstAtElement(headlineRef.current, 1.2)
       const gui = createChalkGui(dust, burstHeadline)
       setTimeout(burstHeadline, 300) // intro puff behind the headline
@@ -68,7 +70,7 @@ function App() {
       </header>
 
       <main>
-        <section className="hero">
+        <section ref={heroRef} className="hero">
           <h1 ref={headlineRef}>Entwickelt für Dich.</h1>
           <a className="cta" href="#produkt">
             Jetzt shoppen

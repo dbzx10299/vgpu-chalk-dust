@@ -81,6 +81,7 @@ struct Sim {
   landingDamping: f32,
   liftThreshold: f32,
   settledAging: f32,
+  scroll: f32,       // how far the page (and with it the floor) moved up the screen this step
   depositSize: vec2u,
 }
 
@@ -325,6 +326,15 @@ fn cs_main(@builtin(global_invocation_id) id: vec3u) {
   // Far particles rest higher, so settled dust forms a receding ground plane instead of a line.
   let floorY = sim.floorY + p.depth * sim.floorDepth;
 
+  // The dust lives in the page, not on the screen: it scrolls along with the hero and its floor.
+  // Below the floor is the rest of the page, so only dust falling onto it from above lands.
+  if (p.grounded > 0.5) {
+    p.pos.y = floorY;
+  } else {
+    p.pos.y += sim.scroll;
+  }
+  let above = p.pos.y >= floorY;
+
   if (p.breakAt > 0.0) {
     if (p.life >= p.breakAt || length(flow - p.vel) > sim.liftThreshold) {
       shatter(&p, &st, false); // crumbles mid-fall, or a gust (e.g. the cursor) knocks it apart
@@ -334,7 +344,7 @@ fn cs_main(@builtin(global_invocation_id) id: vec3u) {
       p.vel *= exp(-sim.clumpDrag * dt);
       p.pos += p.vel * dt;
       p.life += dt;
-      if (p.pos.y < floorY) {
+      if (above && p.pos.y < floorY) {
         p.pos.y = floorY + 0.002; // just above the floor, so the fragments start airborne
         shatter(&p, &st, true);
       }
@@ -343,14 +353,11 @@ fn cs_main(@builtin(global_invocation_id) id: vec3u) {
     }
   }
 
-  let onFloor = p.pos.y <= floorY + 1e-5;
-
-  if (onFloor) {
+  if (p.grounded > 0.5) {
     // Resting dust stays put: no air, no gravity, and the cursor doesn't disturb it.
     p.vel = vec2f(p.vel.x * exp(-sim.floorFriction * dt), 0.0);
     p.pos += p.vel * dt;
     p.pos.y = floorY;
-    p.grounded = 1.0;
     let fadeBefore = grainFade(p.life, p.maxLife);
     p.life += dt * sim.settledAging; // settled chalk lingers before it fades into the floor layer
     depositGrain(p, fadeBefore - grainFade(p.life, p.maxLife), &st);
@@ -373,8 +380,7 @@ fn cs_main(@builtin(global_invocation_id) id: vec3u) {
     p.pos += p.vel * dt;
 
     // Landing: the impact kills vertical motion and most of the horizontal, so dust stays where it falls.
-    p.grounded = 0.0;
-    if (p.pos.y < floorY) {
+    if (above && p.pos.y < floorY) {
       p.pos.y = floorY;
       p.vel = vec2f(p.vel.x * sim.landingDamping, 0.0);
       p.grounded = 1.0;
@@ -384,6 +390,9 @@ fn cs_main(@builtin(global_invocation_id) id: vec3u) {
 
   let margin = 0.4;
   if (abs(p.pos.x) > sim.aspect + margin || p.pos.y > 1.0 + margin || p.pos.y < -1.0 - margin) {
+    if (p.grounded > 0.5) {
+      depositGrain(p, grainFade(p.life, p.maxLife), &st); // scrolled off with the floor: its dust stays on it
+    }
     p.life = p.maxLife;
   }
 

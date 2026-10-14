@@ -1,7 +1,8 @@
 // The air the chalk floats in: Stable Fluids (Stam 1999) on a grid of square cells covering the viewport.
 // Velocity is in world units/s; x in [-aspect, aspect], y in [-1, 1]. Every frame runs, one dispatch each:
 //   advect (+ cursor and clap forces) -> vorticity -> confine -> divergence -> jacobi x N -> project
-// Cells below the floor are solid; the other edges are open, so air can leave the screen.
+// The floor is a solid slab; the air above and below it (the rest of the page, once the hero has
+// scrolled up) is free, and the screen edges are open, so air can leave the screen.
 
 struct Fluid {
   size: vec2u,
@@ -50,8 +51,12 @@ fn center(c: vec2i) -> vec2f {
   return vec2f(-fluid.aspect, -1.0) + (vec2f(c) + 0.5) * fluid.cell;
 }
 
+// Slab thickness in world units: deep enough to reach the bottom of the screen at the default floor height.
+const FLOOR_THICKNESS = 0.25;
+
 fn solid(c: vec2i) -> bool {
-  return center(c).y < fluid.floorY;
+  let y = center(c).y;
+  return y < fluid.floorY && y > fluid.floorY - FLOOR_THICKNESS;
 }
 
 // Neighbour velocity: the floor is at rest, and past an open edge the air keeps flowing as it does here.
