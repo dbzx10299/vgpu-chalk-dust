@@ -16,9 +16,10 @@ import fluidWgsl from './fluid.wgsl?raw'
 import noiseWgsl from './noise.wgsl?raw'
 import renderWgsl from './render.wgsl?raw'
 import simWgsl from './sim.wgsl?raw'
+import { MAX_RINGS, RING_FLOATS, type RingParams, VortexRings } from './vortexRings'
 
 export const MAX_PARTICLES = 250_000
-const PARTICLE_BYTES = 56 // keep in sync with `Particle` in sim.wgsl / render.wgsl
+const PARTICLE_BYTES = 64 // keep in sync with `Particle` in sim.wgsl / render.wgsl (60 B, padded to 8-byte alignment)
 const WORKGROUP = 64
 const MAX_FLUID_CELLS = 512 * 256
 const FLUID_WORKGROUP = 8
@@ -70,8 +71,19 @@ export const defaultParams = {
 
   // Interaction
   mouseRadius: 0.1,
-  mouseStrength: 1.2,
+  mouseStrength: 0.6, // the grid's share of the cursor wake; the vortex rings carry the rest
   mouseDrag: 25,
+
+  // Vortex rings: the wake a hand leaves moving through the powder, shed along the cursor's path
+  ringStrength: 0.8, // air speed through a new ring, as a share of the hand speed; 0 = off
+  ringRadius: 0.07,
+  ringSpacing: 1.2, // hand travel between rings, in ring radii
+  ringMinSpeed: 0.15,
+  ringCore: 0.3, // core radius / ring radius
+  ringDecay: 0.7,
+  ringViscosity: 0.0005,
+  handDepth: 0.5, // how deep in the dust the cursor's hand moves, 0 near .. 1 far
+  depthSpan: 0.6, // world-space depth of the dust volume, for the rings' 3D air
 
   // Bursts
   burstFraction: 0.9,
@@ -171,6 +183,8 @@ export class ChalkDust {
   private pressure!: ReturnType<typeof storage>
   private fluidSize: [number, number] = [0, 0]
   private deposit!: ReturnType<typeof storage>
+  private ringBuf!: ReturnType<typeof storage>
+  private readonly rings = new VortexRings()
   private grains!: ReturnType<typeof draw>
   private smokeDraw!: ReturnType<typeof draw>
   private composite!: ReturnType<typeof effect>
@@ -231,9 +245,10 @@ export class ChalkDust {
     // (coverage, lit coverage) per floor cell, accumulated by the sim and drawn by the composite.
     this.deposit = storage(this.gpu, DEPOSIT_SIZE[0] * DEPOSIT_SIZE[1] * 8, 'read-write')
     this.clearFloor()
+    this.ringBuf = storage(this.gpu, MAX_RINGS * RING_FLOATS * 4, 'read')
     this.sim = compute(this.gpu, simWgsl, {
       label: 'chalk-sim',
-      set: { particles: state, air: this.airVel, deposit: this.deposit },
+      set: { particles: state, air: this.airVel, deposit: this.deposit, rings: this.ringBuf },
     })
     const layerDraw = (label: string) =>
       draw(this.gpu, {
@@ -281,6 +296,7 @@ export class ChalkDust {
 
       if (!p.paused) {
         this.stepFluid(dt, aspect, floorY)
+        this.stepRings(dt, floorY, horizon, perspective)
         this.sim.set({
           sim: {
             time: simTime,
@@ -342,6 +358,8 @@ export class ChalkDust {
             settledAging: p.settledAging,
             scroll: this.pendingScroll,
             depositSize: DEPOSIT_SIZE,
+            ringCount: this.rings.count,
+            depthSpan: Math.max(p.depthSpan, 1e-3),
           },
         })
         this.pendingScroll = 0
@@ -563,6 +581,35 @@ export class ChalkDust {
     const sweeps = Math.max(2, Math.round(p.pressureIterations / 2) * 2)
     for (let i = 0; i < sweeps; i++) this.jacobi[i % 2].dispatch(gx, gy)
     this.project.dispatch(gx, gy)
+  }
+
+  /**
+   * The cursor is a hand moving through the dust at `handDepth`: it sheds vortex rings along its path,
+   * which then move on their own. Runs before the sim reads the rings, and before `pendingScroll` is spent.
+   */
+  private stepRings(dt: number, floorY: number, horizon: number, perspective: number): void {
+    const p = this.params
+    const rp: RingParams = {
+      radius: Math.max(p.ringRadius, 1e-3),
+      strength: p.ringStrength,
+      spacing: Math.max(p.ringSpacing, 0.1),
+      minSpeed: p.ringMinSpeed,
+      core: Math.max(p.ringCore, 0.02),
+      decay: p.ringDecay,
+      viscosity: p.ringViscosity,
+    }
+    this.rings.scroll(this.pendingScroll)
+    if (this.pointer) {
+      // From the screen to world space at the hand's depth, as `unproject` in sim.wgsl.
+      const s = 1 / (1 + perspective * p.handDepth)
+      const [x, y] = this.pointer
+      const hand: [number, number, number] = [x / s, horizon + (y - horizon) / s, p.handDepth * p.depthSpan]
+      this.rings.shed(hand, [this.mouseVel[0] / s, this.mouseVel[1] / s, 0], rp)
+    } else {
+      this.rings.shed(null, [0, 0, 0], rp)
+    }
+    this.rings.step(dt, floorY, rp)
+    this.ringBuf.write(this.rings.pack(rp))
   }
 
   private layerSize(s: number): [number, number] {

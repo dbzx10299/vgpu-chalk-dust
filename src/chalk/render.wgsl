@@ -15,6 +15,7 @@ struct Particle {
   bright: f32,
   breakAt: f32,
   grounded: f32,
+  vz: f32,
 }
 
 struct View {

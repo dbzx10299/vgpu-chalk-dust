@@ -16,6 +16,14 @@ struct Particle {
   bright: f32,
   breakAt: f32,  // > 0 while bonded into a falling clump; the clump shatters at this age
   grounded: f32, // 1 while resting on the floor
+  vz: f32,       // velocity into the screen, world units/s (vortex rings move dust in depth too)
+}
+
+// A vortex ring shed by the cursor, see vortexRings.ts.
+struct Ring {
+  center: vec4f, // xyz, w = radius
+  axis: vec4f,   // xyz unit, w = circulation
+  core: vec4f,   // x = core radius
 }
 
 struct Sim {
@@ -86,6 +94,9 @@ struct Sim {
   settledAging: f32,
   scroll: f32,       // how far the page (and with it the floor) moved up the screen this step
   depositSize: vec2u,
+
+  ringCount: u32,
+  depthSpan: f32,    // world-space depth of the dust volume, depth 0..1; the rings' z axis
 }
 
 // Consecutive particles form a group; a burst selects whole groups, and some groups fly as one clump.
@@ -97,8 +108,54 @@ const CLUMP_SIZE = 16u;
 // Chalk that has built up on the floor, drawn by composite.wgsl. Cells span x across the screen and y
 // across floor depth; each holds (coverage, lit coverage) in DEPOSIT_UNIT fixed point.
 @group(0) @binding(3) var<storage, read_write> deposit: array<atomic<u32>>;
+@group(0) @binding(4) var<storage, read> rings: array<Ring>;
 
 const DEPOSIT_UNIT = 65536.0; // keep in sync with composite.wgsl
+const RING_SEGMENTS = 16u;
+
+// Velocity one vortex ring induces at `x`: Biot–Savart over the ring as smoothed vortex elements,
+// with the same basis as vortexRings.ts. Cut off a few radii out, where it has fallen to ~1/r³ anyway.
+fn ringVelocity(x: vec3f, c: vec3f, n: vec3f, radius: f32, gamma: f32, core: f32) -> vec3f {
+  let d0 = x - c;
+  let reach = 4.0 * radius + 3.0 * core;
+  let dist2 = dot(d0, d0);
+  if (dist2 > reach * reach) { return vec3f(0.0); }
+
+  let helper = select(vec3f(1.0, 0.0, 0.0), vec3f(0.0, 0.0, 1.0), abs(n.z) < 0.9);
+  let e1 = normalize(cross(n, helper));
+  let e2 = cross(n, e1);
+  let dA = 6.2831853 / f32(RING_SEGMENTS);
+  let rot = vec2f(cos(dA), sin(dA));
+  var cs = vec2f(1.0, 0.0); // (cos, sin) of the element's angle, advanced by rotation
+  var u = vec3f(0.0);
+  for (var k = 0u; k < RING_SEGMENTS; k++) {
+    let rho = e1 * cs.x + e2 * cs.y;
+    let t = e2 * cs.x - e1 * cs.y;
+    let d = d0 - rho * radius;
+    let q = dot(d, d) + core * core;
+    u += cross(t, d) / (q * sqrt(q));
+    cs = vec2f(cs.x * rot.x - cs.y * rot.y, cs.x * rot.y + cs.y * rot.x);
+  }
+  let fade = 1.0 - smoothstep(0.75 * reach * reach, reach * reach, dist2);
+  return u * gamma * radius / (2.0 * f32(RING_SEGMENTS)) * fade;
+}
+
+// Air moved by the cursor's vortex rings at world point `x`, plus their images under the floor,
+// which keep the air from flowing through it.
+fn ringAir(x: vec3f) -> vec3f {
+  let hasFloor = sim.floorY > -50.0;
+  var u = vec3f(0.0);
+  for (var i = 0u; i < sim.ringCount; i++) {
+    let r = rings[i];
+    u += ringVelocity(x, r.center.xyz, r.axis.xyz, r.center.w, r.axis.w, r.core.x);
+    if (hasFloor) {
+      let c = vec3f(r.center.x, 2.0 * sim.floorY - r.center.y, r.center.z);
+      let n = vec3f(r.axis.x, -r.axis.y, r.axis.z);
+      u += ringVelocity(x, c, n, r.center.w, r.axis.w, r.core.x);
+    }
+  }
+  return u;
+}
 
 // On-screen scale of things at this depth. Keep the projection in sync with render.wgsl and composite.wgsl.
 fn depthScale(depth: f32) -> f32 {
@@ -186,6 +243,7 @@ fn spawn(p: ptr<function, Particle>, st: ptr<function, u32>, isBurst: bool) {
   (*p).life = 0.0;
   (*p).breakAt = 0.0;
   (*p).grounded = 0.0;
+  (*p).vz = 0.0;
   (*p).maxLife = mix(sim.lifeMin, sim.lifeMax, rnd(st)) * select(1.0, 1.4, isCloud);
 
   let s = rnd(st);
@@ -259,6 +317,7 @@ fn spawnClump(p: ptr<function, Particle>, gst: ptr<function, u32>, st: ptr<funct
 
   (*p).kind = 0.0;
   (*p).grounded = 0.0;
+  (*p).vz = 0.0;
   (*p).depth = depth;
   (*p).vel = dir * speed + vec2f(0.0, sim.burstSpeed * sim.burstLift);
   (*p).pos = center + o;
@@ -357,8 +416,15 @@ fn cs_main(@builtin(global_invocation_id) id: vec3u) {
   }
   let above = p.pos.y >= floorY;
 
+  // The cursor's vortex rings stir the air in 3D, on top of the grid. Resting dust ignores the air.
+  var swirl = vec3f(0.0);
+  if (p.grounded < 0.5 && sim.ringCount > 0u) {
+    swirl = ringAir(vec3f(p.pos, p.depth * sim.depthSpan));
+  }
+  let wind = flow + swirl.xy;
+
   if (p.breakAt > 0.0) {
-    if (p.life >= p.breakAt || length(flow - p.vel) > sim.liftThreshold) {
+    if (p.life >= p.breakAt || length(wind - p.vel) > sim.liftThreshold) {
       shatter(&p, &st, false); // crumbles mid-fall, or a gust (e.g. the cursor) knocks it apart
     } else {
       // Bonded: a dense lump ignores the air, so every member follows the identical trajectory.
@@ -386,8 +452,8 @@ fn cs_main(@builtin(global_invocation_id) id: vec3u) {
   } else {
     // The air is the fluid grid, stirred by claps and the cursor. Where it moves fast it is also turbulent
     // below the grid's resolution, so add curl noise there; the room air itself is otherwise still.
-    let eddy = sim.subgrid * length(flow) + sim.stillAir;
-    let air = flow + curl(p.pos * sim.noiseScale + p.depth * 3.0, sim.time * sim.noiseSpeed) * eddy;
+    let eddy = sim.subgrid * length(wind) + sim.stillAir;
+    let air = wind + curl(p.pos * sim.noiseScale + p.depth * 3.0, sim.time * sim.noiseSpeed) * eddy;
 
     // Stokes-like settling: bigger pieces fall faster and shrug off the air; smoke barely sinks.
     let heavy = clamp(p.size / sim.heavySize, 0.0, 1.0);
@@ -401,10 +467,17 @@ fn cs_main(@builtin(global_invocation_id) id: vec3u) {
     p.vel = air + (p.vel - air) * exp(-coupling * dt);
     p.pos += p.vel * dt;
 
+    // Rings also carry dust toward or away from the camera, within the dust volume.
+    p.vz = swirl.z + (p.vz - swirl.z) * exp(-coupling * dt);
+    let depth = p.depth + p.vz / sim.depthSpan * dt;
+    p.depth = clamp(depth, 0.0, 1.0);
+    if (depth != p.depth) { p.vz = 0.0; }
+
     // Landing: the impact kills vertical motion and most of the horizontal, so dust stays where it falls.
     if (above && p.pos.y < floorY) {
       p.pos.y = floorY;
       p.vel = vec2f(p.vel.x * sim.landingDamping, 0.0);
+      p.vz = 0.0;
       p.grounded = 1.0;
     }
     p.life += dt;

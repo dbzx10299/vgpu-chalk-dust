@@ -54,6 +54,17 @@ export function createChalkGui(dust: ChalkDust, onBurst: () => void): GUI {
   interaction.add(p, 'mouseStrength', 0, 4, 0.01).name('cursor push')
   interaction.add(p, 'mouseDrag', 0, 100, 0.1).name('cursor grip')
 
+  const rings = gui.addFolder('Vortex rings (cursor wake)')
+  rings.add(p, 'ringStrength', 0, 3, 0.01).name('strength')
+  rings.add(p, 'ringRadius', 0.01, 0.3, 0.001).name('radius')
+  rings.add(p, 'ringSpacing', 0.2, 5, 0.01).name('spacing (radii)')
+  rings.add(p, 'ringMinSpeed', 0, 2, 0.01).name('min hand speed')
+  rings.add(p, 'ringCore', 0.05, 0.8, 0.01).name('core size')
+  rings.add(p, 'ringDecay', 0, 5, 0.01).name('decay')
+  rings.add(p, 'ringViscosity', 0, 0.01, 0.0001).name('core spreading')
+  rings.add(p, 'handDepth', 0, 1, 0.01).name('hand depth')
+  rings.add(p, 'depthSpan', 0.05, 3, 0.01).name('dust volume depth')
+
   const burst = gui.addFolder('Burst')
   burst.add(p, 'burstFraction', 0, 1, 0.01).name('particle share')
   burst.add(p, 'burstSpeed', 0, 4, 0.01).name('speed')
@@ -125,7 +136,7 @@ export function createChalkGui(dust: ChalkDust, onBurst: () => void): GUI {
   tone.add(p, 'contrast', 0.3, 3, 0.01)
   tone.add(p, 'grain', 0, 1, 0.01).name('film grain')
 
-  for (const folder of [physics, air, population, emitter, interaction, burst, clumps, light, floor, look, tone]) {
+  for (const folder of [physics, air, population, emitter, interaction, rings, burst, clumps, light, floor, look, tone]) {
     folder.close()
   }
 
